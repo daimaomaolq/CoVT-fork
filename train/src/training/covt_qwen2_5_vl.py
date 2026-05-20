@@ -1048,6 +1048,97 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         self.siglip_token_idx = siglip_token_idx
         self.metaclip_token_idx = metaclip_token_idx
 
+    def _collect_token_hidden_states(self, input_ids, hidden_states, token_idx):
+        if token_idx is None:
+            return [], []
+
+        token_mask = input_ids == token_idx
+        valid_indices = []
+        token_features = []
+        for batch_idx in range(input_ids.shape[0]):
+            if token_mask[batch_idx].any():
+                valid_indices.append(batch_idx)
+                token_features.append(hidden_states[batch_idx, token_mask[batch_idx]])
+
+        if not token_features:
+            return [], []
+
+        lengths = {features.shape[0] for features in token_features}
+        if len(lengths) == 1:
+            token_features = torch.stack(token_features, dim=0)
+
+        return token_features, valid_indices
+
+    def extract_visual_thought_tokens(
+        self,
+        input_ids,
+        hidden_states,
+        project=True,
+        cross_attention=True,
+        detach=False,
+    ):
+        """
+        Extract CoVT visual thought token states from a completed forward pass.
+
+        The returned raw states are the hidden states at the special anchor token
+        positions. When project=True, the method also returns the same projected
+        and optionally cross-attended representations used by the anchor losses.
+        """
+
+        def maybe_detach(value):
+            if detach and isinstance(value, torch.Tensor):
+                return value.detach()
+            return value
+
+        outputs = {}
+        sam_hidden, sam_valid_indices = self._collect_token_hidden_states(
+            input_ids, hidden_states, self.sam_token_idx
+        )
+        dino_hidden, dino_valid_indices = self._collect_token_hidden_states(
+            input_ids, hidden_states, self.dino_token_idx
+        )
+
+        outputs["sam"] = {
+            "hidden_states": maybe_detach(sam_hidden),
+            "valid_indices": sam_valid_indices,
+        }
+        outputs["dino"] = {
+            "hidden_states": maybe_detach(dino_hidden),
+            "valid_indices": dino_valid_indices,
+        }
+
+        if not project:
+            return outputs
+
+        if isinstance(sam_hidden, torch.Tensor) and self.sam_projection is not None:
+            sam_projected = self.sam_projection(self.apply_rope_custome(sam_hidden))
+            outputs["sam"]["projected"] = maybe_detach(sam_projected)
+            if cross_attention and self.sam_cross_attention is not None and self.sam_query_vectors is not None:
+                sam_query = self.sam_query_vectors.unsqueeze(0)
+                sam_query = sam_query.expand(len(sam_valid_indices), -1, -1).to(sam_projected.dtype)
+                sam_proj_norm = nn.functional.normalize(sam_projected)
+                sam_attn_output, _ = self.sam_cross_attention(
+                    query=sam_query,
+                    key=sam_proj_norm,
+                    value=sam_proj_norm,
+                )
+                outputs["sam"]["attended"] = maybe_detach(sam_attn_output.reshape(sam_projected.shape))
+
+        if isinstance(dino_hidden, torch.Tensor) and self.dino_projection is not None:
+            dino_projected = nn.functional.normalize(self.dino_projection(dino_hidden))
+            outputs["dino"]["projected"] = maybe_detach(dino_projected)
+            if cross_attention and self.dino_cross_attention is not None and self.dino_query_vectors is not None:
+                dino_query = self.dino_query_vectors.unsqueeze(0)
+                dino_query = dino_query.expand(len(dino_valid_indices), -1, -1).to(dino_projected.dtype)
+                dino_attn_output, _ = self.dino_cross_attention(
+                    query=dino_query,
+                    key=dino_projected,
+                    value=dino_projected,
+                )
+                outputs["dino"]["attended"] = maybe_detach(dino_attn_output)
+
+        return outputs
+
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
