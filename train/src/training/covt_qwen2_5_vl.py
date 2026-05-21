@@ -46,7 +46,10 @@ from training.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
 from training.modeling_qwen2_5_vl import *
-from diffusers import AutoencoderKL
+try:
+    from diffusers import AutoencoderKL
+except Exception:
+    AutoencoderKL = None
 
 from anchors.segment_anything import (
     build_sam_vit_h,

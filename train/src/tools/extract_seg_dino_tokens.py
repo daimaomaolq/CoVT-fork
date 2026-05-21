@@ -110,6 +110,34 @@ def resolve_dtype(dtype_arg: str, torch_module) -> Any:
     }[dtype_arg]
 
 
+def patch_missing_xpu_backend(torch_module) -> None:
+    if hasattr(torch_module, "xpu"):
+        return
+
+    class _NoXPU:
+        @staticmethod
+        def is_available():
+            return False
+
+        @staticmethod
+        def device_count():
+            return 0
+
+        @staticmethod
+        def empty_cache():
+            return None
+
+        @staticmethod
+        def manual_seed(seed):
+            return None
+
+        @staticmethod
+        def manual_seed_all(seed):
+            return None
+
+    torch_module.xpu = _NoXPU()
+
+
 def token_id(tokenizer, token: str) -> int:
     token_ids = tokenizer(token, add_special_tokens=False).input_ids
     if len(token_ids) != 1:
@@ -173,6 +201,7 @@ def main() -> None:
         raise RuntimeError("Please install qwen-vl-utils before running extraction.") from err
 
     import torch
+    patch_missing_xpu_backend(torch)
 
     device = resolve_device(args.device, torch)
     dtype = resolve_dtype(args.torch_dtype, torch)
