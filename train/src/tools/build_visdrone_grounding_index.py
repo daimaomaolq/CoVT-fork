@@ -27,6 +27,12 @@ DEFAULT_TEMPLATES = (
     "locate the {category}",
 )
 
+SPATIAL_TEMPLATES = (
+    "find the {scale_category} in the {region}",
+    "locate the {scale_category} near the {region}",
+    "find the {category} in the {region} of the image",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -69,7 +75,13 @@ def parse_args() -> argparse.Namespace:
         "--template",
         action="append",
         default=None,
-        help="Phrase template. Can be repeated. Use {category}.",
+        help="Phrase template. Can be repeated. Available fields: category, scale, scale_category, region.",
+    )
+    parser.add_argument(
+        "--query-mode",
+        default="spatial",
+        choices=("simple", "spatial", "mixed"),
+        help="Query style. spatial adds coarse location and scale phrases.",
     )
     parser.add_argument(
         "--source",
@@ -118,6 +130,87 @@ def find_image(image_dir: Path, stem: str) -> Path:
     return image_dir / f"{stem}.jpg"
 
 
+def scale_name(bbox_norm: list[float]) -> str:
+    area = max(bbox_norm[2] - bbox_norm[0], 0.0) * max(bbox_norm[3] - bbox_norm[1], 0.0)
+    if area < 0.01:
+        return "small"
+    if area < 0.08:
+        return "medium"
+    return "large"
+
+
+def region_name(bbox_norm: list[float]) -> tuple[str, str, str]:
+    cx = (bbox_norm[0] + bbox_norm[2]) * 0.5
+    cy = (bbox_norm[1] + bbox_norm[3]) * 0.5
+
+    if cx < 1.0 / 3.0:
+        horizontal = "left"
+    elif cx < 2.0 / 3.0:
+        horizontal = "center"
+    else:
+        horizontal = "right"
+
+    if cy < 1.0 / 3.0:
+        vertical = "upper"
+    elif cy < 2.0 / 3.0:
+        vertical = "middle"
+    else:
+        vertical = "lower"
+
+    if horizontal == "center" and vertical == "middle":
+        region = "center"
+    elif horizontal == "center":
+        region = f"{vertical} center"
+    elif vertical == "middle":
+        region = f"{horizontal} side"
+    else:
+        region = f"{vertical} {horizontal}"
+    return region, horizontal, vertical
+
+
+def build_query(
+    category: str,
+    bbox_norm: list[float] | None,
+    templates: tuple[str, ...],
+    query_mode: str,
+    row_index: int,
+) -> tuple[str, dict[str, str]]:
+    if query_mode == "simple" or bbox_norm is None:
+        template = templates[row_index % len(templates)]
+        return template.format(
+            category=category,
+            scale="",
+            scale_category=category,
+            region="image",
+        ), {"query_type": "simple"}
+
+    scale = scale_name(bbox_norm)
+    region, horizontal, vertical = region_name(bbox_norm)
+    scale_category = f"{scale} {category}" if scale != "medium" else category
+    use_spatial = query_mode == "spatial" or row_index % 2 == 0
+    if use_spatial:
+        template = templates[row_index % len(templates)]
+        query_type = "spatial"
+    else:
+        template = DEFAULT_TEMPLATES[row_index % len(DEFAULT_TEMPLATES)]
+        query_type = "simple"
+
+    return template.format(
+        category=category,
+        scale=scale,
+        scale_category=scale_category,
+        region=region,
+        horizontal=horizontal,
+        vertical=vertical,
+    ), {
+        "query_type": query_type,
+        "scale": scale,
+        "region": region,
+        "horizontal_region": horizontal,
+        "vertical_region": vertical,
+    }
+
+
 def main() -> None:
     args = parse_args()
     root = Path(args.visdrone_root).expanduser().resolve()
@@ -127,7 +220,7 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     keep_categories = parse_categories(args.categories)
-    templates = tuple(args.template or DEFAULT_TEMPLATES)
+    templates = tuple(args.template or (SPATIAL_TEMPLATES if args.query_mode != "simple" else DEFAULT_TEMPLATES))
     total_images = 0
     total_rows = 0
     per_category_total: dict[str, int] = defaultdict(int)
@@ -155,12 +248,22 @@ def main() -> None:
 
                 category = VISDRONE_CATEGORIES.get(category_id, f"category {category_id}")
                 x1, y1, x2, y2 = x, y, x + w, y + h
-                template = templates[(per_image_count + category_id) % len(templates)]
-                sample_id = f"visdrone_{annotation_path.stem}_{box_idx:05d}"
+                bbox_norm = None
+                if size is not None:
+                    width, height = size
+                    bbox_norm = [x1 / width, y1 / height, x2 / width, y2 / height]
+                query, query_metadata = build_query(
+                    category=category,
+                    bbox_norm=bbox_norm,
+                    templates=templates,
+                    query_mode=args.query_mode,
+                    row_index=per_image_count + category_id,
+                )
+                sample_id = f"visdrone_{annotation_path.stem}_{box_idx:05d}_{query_metadata['query_type']}"
                 row = {
                     "sample_id": sample_id,
                     "image": str(image_path),
-                    "query": template.format(category=category),
+                    "query": query,
                     "bbox": [x1, y1, x2, y2],
                     "bbox_format": "xyxy_abs",
                     "category": category,
@@ -168,11 +271,11 @@ def main() -> None:
                     "source": args.source,
                     "annotation": str(annotation_path),
                     "object_score": score,
+                    **query_metadata,
                 }
-                if size is not None:
-                    width, height = size
+                if bbox_norm is not None:
                     row["image_size"] = [width, height]
-                    row["bbox_norm"] = [x1 / width, y1 / height, x2 / width, y2 / height]
+                    row["bbox_norm"] = bbox_norm
 
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
                 total_rows += 1

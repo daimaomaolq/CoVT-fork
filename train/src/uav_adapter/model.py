@@ -22,12 +22,16 @@ class UAVPerceptionAdapter(nn.Module):
         num_heads: int = 8,
         query_vocab_size: int = 8192,
         num_scale_bins: int = 3,
+        max_sam_tokens: int = 64,
+        max_dino_tokens: int = 2048,
     ) -> None:
         super().__init__()
         if hidden_dim % num_heads != 0:
             raise ValueError(f"hidden_dim={hidden_dim} must be divisible by num_heads={num_heads}")
         self.num_region_queries = num_region_queries
         self.num_scale_bins = num_scale_bins
+        self.max_sam_tokens = max_sam_tokens
+        self.max_dino_tokens = max_dino_tokens
 
         self.sam_proj = nn.Sequential(
             nn.LayerNorm(sam_dim),
@@ -51,6 +55,8 @@ class UAVPerceptionAdapter(nn.Module):
 
         self.sam_type = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.dino_type = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        self.sam_position = nn.Parameter(torch.randn(max_sam_tokens, hidden_dim) * 0.01)
+        self.dino_position = nn.Parameter(torch.randn(max_dino_tokens, hidden_dim) * 0.01)
         self.region_queries = nn.Parameter(torch.randn(num_region_queries, hidden_dim) * 0.02)
 
         self.visual_norm = nn.LayerNorm(hidden_dim)
@@ -90,6 +96,18 @@ class UAVPerceptionAdapter(nn.Module):
         pooled = (query_emb * mask).sum(dim=1) / lengths
         return self.query_encoder(pooled)
 
+    def _position_encoding(self, table: torch.Tensor, token_count: int) -> torch.Tensor:
+        if token_count <= table.shape[0]:
+            return table[:token_count].unsqueeze(0)
+        source = table.transpose(0, 1).unsqueeze(0)
+        resized = torch.nn.functional.interpolate(
+            source,
+            size=token_count,
+            mode="linear",
+            align_corners=False,
+        )
+        return resized.squeeze(0).transpose(0, 1).unsqueeze(0)
+
     def forward(
         self,
         sam_tokens: torch.Tensor,
@@ -99,8 +117,10 @@ class UAVPerceptionAdapter(nn.Module):
         batch_size = sam_tokens.shape[0]
         device = sam_tokens.device
 
-        sam_visual = self.sam_proj(sam_tokens) + self.sam_type
-        dino_visual = self.dino_proj(dino_tokens) + self.dino_type
+        sam_pos = self._position_encoding(self.sam_position, sam_tokens.shape[1]).to(sam_tokens.dtype)
+        dino_pos = self._position_encoding(self.dino_position, dino_tokens.shape[1]).to(dino_tokens.dtype)
+        sam_visual = self.sam_proj(sam_tokens) + self.sam_type + sam_pos
+        dino_visual = self.dino_proj(dino_tokens) + self.dino_type + dino_pos
         visual_tokens = self.visual_norm(torch.cat([sam_visual, dino_visual], dim=1))
 
         query_context = self._encode_query(query_tokens, batch_size, device)

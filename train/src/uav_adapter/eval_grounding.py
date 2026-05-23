@@ -59,6 +59,8 @@ def main() -> None:
         num_region_queries=config.get("num_region_queries", 8),
         num_heads=config.get("num_heads", 8),
         query_vocab_size=config.get("query_vocab_size", 8192),
+        max_sam_tokens=config.get("max_sam_tokens", 64),
+        max_dino_tokens=config.get("max_dino_tokens", 2048),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--query-max-len", type=int, default=32)
     parser.add_argument("--query-vocab-size", type=int, default=8192)
+    parser.add_argument("--max-sam-tokens", type=int, default=64)
+    parser.add_argument("--max-dino-tokens", type=int, default=2048)
     parser.add_argument("--rank-loss-weight", type=float, default=0.2)
     parser.add_argument("--scale-loss-weight", type=float, default=0.1)
     parser.add_argument("--aux-bbox-loss-weight", type=float, default=0.2)
@@ -200,6 +202,8 @@ def main() -> None:
         num_region_queries=args.num_region_queries,
         num_heads=args.num_heads,
         query_vocab_size=args.query_vocab_size,
+        max_sam_tokens=args.max_sam_tokens,
+        max_dino_tokens=args.max_dino_tokens,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -273,6 +277,8 @@ def main() -> None:
             "num_heads": args.num_heads,
             "query_vocab_size": args.query_vocab_size,
             "query_max_len": args.query_max_len,
+            "max_sam_tokens": args.max_sam_tokens,
+            "max_dino_tokens": args.max_dino_tokens,
         },
         "history": history,
         "args": vars(args),
