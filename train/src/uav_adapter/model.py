@@ -122,7 +122,8 @@ class UAVPerceptionAdapter(nn.Module):
         region_features = attended + self_attended
         region_features = region_features + self.region_ffn(region_features)
 
-        candidate_bboxes = self.bbox_head(region_features).sigmoid()
+        candidate_bbox_logits = self.bbox_head(region_features)
+        candidate_bboxes = candidate_bbox_logits.sigmoid()
         candidate_scores = self.score_head(region_features).squeeze(-1)
         scale_logits = self.scale_head(region_features)
 
@@ -141,6 +142,7 @@ class UAVPerceptionAdapter(nn.Module):
         return {
             "bbox": best_bbox,
             "score": best_score,
+            "candidate_bbox_logits": candidate_bbox_logits,
             "candidate_bboxes": candidate_bboxes,
             "candidate_scores": candidate_scores,
             "topk_bboxes": top_bboxes,

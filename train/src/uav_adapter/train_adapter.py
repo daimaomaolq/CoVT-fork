@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aux-bbox-loss-weight", type=float, default=0.2)
     parser.add_argument("--center-size-loss-weight", type=float, default=0.5)
     parser.add_argument("--score-loss-weight", type=float, default=0.1)
+    parser.add_argument("--bbox-logit-loss-weight", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     return parser.parse_args()
 
@@ -215,11 +216,18 @@ def main() -> None:
             scale_label = batch["scale_label"].to(device)
             pred = model(sam_tokens, dino_tokens, query_tokens=query_tokens)
             candidates = normalize_box_order(pred["candidate_bboxes"])
+            candidate_logits = pred["candidate_bbox_logits"]
             candidate_dist = candidate_l1_distance(candidates, bbox)
             best_idx = candidate_dist.detach().argmin(dim=1)
             batch_indices = torch.arange(bbox.shape[0], device=device)
             matched_bbox = candidates[batch_indices, best_idx]
+            matched_logits = candidate_logits[batch_indices, best_idx]
             bbox_loss = F.smooth_l1_loss(matched_bbox, bbox)
+            bbox_logit_loss = F.binary_cross_entropy_with_logits(matched_logits, bbox)
+            aux_bbox_logit_loss = F.binary_cross_entropy_with_logits(
+                candidate_logits,
+                bbox.unsqueeze(1).expand_as(candidate_logits),
+            )
             aux_bbox_loss = F.smooth_l1_loss(candidates, bbox.unsqueeze(1).expand_as(candidates))
             center_size_loss = F.smooth_l1_loss(box_cxcywh(matched_bbox), box_cxcywh(bbox))
             rank_loss = F.cross_entropy(pred["candidate_scores"], best_idx)
@@ -231,7 +239,9 @@ def main() -> None:
             )
             loss = (
                 bbox_loss
+                + args.bbox_logit_loss_weight * bbox_logit_loss
                 + args.aux_bbox_loss_weight * aux_bbox_loss
+                + args.aux_bbox_loss_weight * aux_bbox_logit_loss
                 + args.center_size_loss_weight * center_size_loss
                 + args.score_loss_weight * score_loss
                 + args.rank_loss_weight * rank_loss
