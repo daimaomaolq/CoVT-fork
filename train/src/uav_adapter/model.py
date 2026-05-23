@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -18,12 +20,13 @@ class UAVPerceptionAdapter(nn.Module):
         dino_dim: int = 1024,
         hidden_dim: int = 256,
         dropout: float = 0.1,
-        num_region_queries: int = 8,
+        num_region_queries: int = 32,
         num_heads: int = 8,
         query_vocab_size: int = 8192,
         num_scale_bins: int = 3,
         max_sam_tokens: int = 64,
         max_dino_tokens: int = 2048,
+        anchor_delta_scale: float = 1.5,
     ) -> None:
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -32,6 +35,8 @@ class UAVPerceptionAdapter(nn.Module):
         self.num_scale_bins = num_scale_bins
         self.max_sam_tokens = max_sam_tokens
         self.max_dino_tokens = max_dino_tokens
+        self.anchor_delta_scale = anchor_delta_scale
+        self.register_buffer("anchor_boxes", self._make_anchor_boxes(num_region_queries), persistent=False)
 
         self.sam_proj = nn.Sequential(
             nn.LayerNorm(sam_dim),
@@ -58,6 +63,11 @@ class UAVPerceptionAdapter(nn.Module):
         self.sam_position = nn.Parameter(torch.randn(max_sam_tokens, hidden_dim) * 0.01)
         self.dino_position = nn.Parameter(torch.randn(max_dino_tokens, hidden_dim) * 0.01)
         self.region_queries = nn.Parameter(torch.randn(num_region_queries, hidden_dim) * 0.02)
+        self.anchor_encoder = nn.Sequential(
+            nn.Linear(4, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
 
         self.visual_norm = nn.LayerNorm(hidden_dim)
         self.query_to_visual = nn.MultiheadAttention(
@@ -84,6 +94,40 @@ class UAVPerceptionAdapter(nn.Module):
         self.score_head = nn.Linear(hidden_dim, 1)
         self.scale_head = nn.Linear(hidden_dim, num_scale_bins)
 
+    @staticmethod
+    def _make_anchor_boxes(num_boxes: int) -> torch.Tensor:
+        grid = max(1, math.ceil(math.sqrt(num_boxes)))
+        if num_boxes == 1:
+            selected_cells = [(grid // 2, grid // 2)]
+        else:
+            cells = [(x_idx, y_idx) for y_idx in range(grid) for x_idx in range(grid)]
+            selected_cells = [
+                cells[round(index * (len(cells) - 1) / (num_boxes - 1))]
+                for index in range(num_boxes)
+            ]
+
+        boxes = []
+        base = 0.82 / grid
+        scales = (0.45, 0.70, 1.00, 1.35)
+        aspect_ratios = (0.60, 1.00, 1.70)
+        for index, (x_idx, y_idx) in enumerate(selected_cells):
+            cx = (x_idx + 0.5) / grid
+            cy = (y_idx + 0.5) / grid
+            scale = scales[index % len(scales)]
+            aspect = aspect_ratios[(index // len(scales)) % len(aspect_ratios)]
+            side = base * scale
+            width = min(side * math.sqrt(aspect), 0.80)
+            height = min(side / math.sqrt(aspect), 0.80)
+            boxes.append(
+                [
+                    max(cx - width * 0.5, 0.0),
+                    max(cy - height * 0.5, 0.0),
+                    min(cx + width * 0.5, 1.0),
+                    min(cy + height * 0.5, 1.0),
+                ]
+            )
+        return torch.tensor(boxes, dtype=torch.float32)
+
     def _encode_query(self, query_tokens: torch.Tensor | None, batch_size: int, device: torch.device) -> torch.Tensor:
         if query_tokens is None:
             query_tokens = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
@@ -108,6 +152,20 @@ class UAVPerceptionAdapter(nn.Module):
         )
         return resized.squeeze(0).transpose(0, 1).unsqueeze(0)
 
+    def _decode_anchor_deltas(self, deltas: torch.Tensor) -> torch.Tensor:
+        anchors = self.anchor_boxes.to(device=deltas.device, dtype=deltas.dtype)
+        anchor_center = (anchors[:, :2] + anchors[:, 2:]) * 0.5
+        anchor_size = (anchors[:, 2:] - anchors[:, :2]).clamp(min=1e-4)
+
+        delta_center = torch.tanh(deltas[..., :2]) * anchor_size.unsqueeze(0) * self.anchor_delta_scale
+        delta_size = torch.tanh(deltas[..., 2:]) * self.anchor_delta_scale
+        pred_center = anchor_center.unsqueeze(0) + delta_center
+        pred_size = anchor_size.unsqueeze(0) * torch.exp(delta_size.clamp(min=-2.0, max=2.0))
+
+        top_left = pred_center - pred_size * 0.5
+        bottom_right = pred_center + pred_size * 0.5
+        return torch.cat([top_left, bottom_right], dim=-1).clamp(min=0.0, max=1.0)
+
     def forward(
         self,
         sam_tokens: torch.Tensor,
@@ -125,7 +183,8 @@ class UAVPerceptionAdapter(nn.Module):
 
         query_context = self._encode_query(query_tokens, batch_size, device)
         region_queries = self.region_queries.unsqueeze(0).expand(batch_size, -1, -1)
-        region_queries = region_queries + query_context.unsqueeze(1)
+        anchor_context = self.anchor_encoder(self.anchor_boxes.to(device=device, dtype=region_queries.dtype))
+        region_queries = region_queries + query_context.unsqueeze(1) + anchor_context.unsqueeze(0)
 
         attended, attn_weights = self.query_to_visual(
             query=region_queries,
@@ -142,8 +201,8 @@ class UAVPerceptionAdapter(nn.Module):
         region_features = attended + self_attended
         region_features = region_features + self.region_ffn(region_features)
 
-        candidate_bbox_logits = self.bbox_head(region_features)
-        candidate_bboxes = candidate_bbox_logits.sigmoid()
+        candidate_bbox_deltas = self.bbox_head(region_features)
+        candidate_bboxes = self._decode_anchor_deltas(candidate_bbox_deltas)
         candidate_scores = self.score_head(region_features).squeeze(-1)
         scale_logits = self.scale_head(region_features)
 
@@ -162,7 +221,8 @@ class UAVPerceptionAdapter(nn.Module):
         return {
             "bbox": best_bbox,
             "score": best_score,
-            "candidate_bbox_logits": candidate_bbox_logits,
+            "anchor_boxes": self.anchor_boxes.to(device=device, dtype=candidate_bboxes.dtype),
+            "candidate_bbox_deltas": candidate_bbox_deltas,
             "candidate_bboxes": candidate_bboxes,
             "candidate_scores": candidate_scores,
             "topk_bboxes": top_bboxes,

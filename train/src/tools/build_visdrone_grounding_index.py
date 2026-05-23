@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Iterable
 
 
+INDEX_VERSION = "v4"
+
 VISDRONE_CATEGORIES = {
     0: "ignored region",
     1: "pedestrian",
@@ -31,6 +33,7 @@ SPATIAL_TEMPLATES = (
     "find the {scale_category} in the {region}",
     "locate the {scale_category} near the {region}",
     "find the {category} in the {region} of the image",
+    "find the {category} in the {region} of the {density} scene",
 )
 
 
@@ -64,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated VisDrone category ids to keep.",
     )
     parser.add_argument("--min-area", type=float, default=4.0)
+    parser.add_argument(
+        "--min-object-score",
+        type=int,
+        default=1,
+        help="Minimum VisDrone object score to keep. Use 1 to skip ignored boxes.",
+    )
     parser.add_argument("--max-per-image", type=int, default=None)
     parser.add_argument("--max-per-category-per-image", type=int, default=None)
     parser.add_argument(
@@ -75,7 +84,10 @@ def parse_args() -> argparse.Namespace:
         "--template",
         action="append",
         default=None,
-        help="Phrase template. Can be repeated. Available fields: category, scale, scale_category, region.",
+        help=(
+            "Phrase template. Can be repeated. Available fields: category, scale, "
+            "scale_category, region, horizontal, vertical, density."
+        ),
     )
     parser.add_argument(
         "--query-mode",
@@ -139,6 +151,14 @@ def scale_name(bbox_norm: list[float]) -> str:
     return "large"
 
 
+def density_name(object_count: int) -> str:
+    if object_count < 8:
+        return "sparse"
+    if object_count < 24:
+        return "moderately crowded"
+    return "dense"
+
+
 def region_name(bbox_norm: list[float]) -> tuple[str, str, str]:
     cx = (bbox_norm[0] + bbox_norm[2]) * 0.5
     cy = (bbox_norm[1] + bbox_norm[3]) * 0.5
@@ -174,7 +194,8 @@ def build_query(
     templates: tuple[str, ...],
     query_mode: str,
     row_index: int,
-) -> tuple[str, dict[str, str]]:
+    density: str,
+) -> tuple[str, dict[str, object]]:
     if query_mode == "simple" or bbox_norm is None:
         template = templates[row_index % len(templates)]
         return template.format(
@@ -182,7 +203,13 @@ def build_query(
             scale="",
             scale_category=category,
             region="image",
-        ), {"query_type": "simple"}
+            horizontal="",
+            vertical="",
+            density=density,
+        ), {
+            "query_type": "simple",
+            "density": density,
+        }
 
     scale = scale_name(bbox_norm)
     region, horizontal, vertical = region_name(bbox_norm)
@@ -202,12 +229,14 @@ def build_query(
         region=region,
         horizontal=horizontal,
         vertical=vertical,
+        density=density,
     ), {
         "query_type": query_type,
         "scale": scale,
         "region": region,
         "horizontal_region": horizontal,
         "vertical_region": vertical,
+        "density": density,
     }
 
 
@@ -230,11 +259,20 @@ def main() -> None:
             total_images += 1
             image_path = find_image(image_dir, annotation_path.stem)
             size = image_size(image_path) if args.normalized else None
+            annotations = list(read_annotation(annotation_path))
+            valid_object_count = sum(
+                1
+                for _, _, w, h, score, category_id in annotations
+                if category_id in keep_categories and score >= args.min_object_score and w * h >= args.min_area
+            )
+            density = density_name(valid_object_count)
             per_image_count = 0
             per_image_category_count: dict[int, int] = defaultdict(int)
 
-            for box_idx, (x, y, w, h, score, category_id) in enumerate(read_annotation(annotation_path)):
+            for box_idx, (x, y, w, h, score, category_id) in enumerate(annotations):
                 if category_id not in keep_categories:
+                    continue
+                if score < args.min_object_score:
                     continue
                 if w * h < args.min_area:
                     continue
@@ -258,8 +296,9 @@ def main() -> None:
                     templates=templates,
                     query_mode=args.query_mode,
                     row_index=per_image_count + category_id,
+                    density=density,
                 )
-                sample_id = f"visdrone_{annotation_path.stem}_{box_idx:05d}_{query_metadata['query_type']}"
+                sample_id = f"visdrone_{annotation_path.stem}_{box_idx:05d}_{query_metadata['query_type']}_{INDEX_VERSION}"
                 row = {
                     "sample_id": sample_id,
                     "image": str(image_path),
@@ -271,6 +310,8 @@ def main() -> None:
                     "source": args.source,
                     "annotation": str(annotation_path),
                     "object_score": score,
+                    "image_object_count": valid_object_count,
+                    "query_version": INDEX_VERSION,
                     **query_metadata,
                 }
                 if bbox_norm is not None:

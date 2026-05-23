@@ -61,6 +61,7 @@ def main() -> None:
         query_vocab_size=config.get("query_vocab_size", 8192),
         max_sam_tokens=config.get("max_sam_tokens", 64),
         max_dino_tokens=config.get("max_dino_tokens", 2048),
+        anchor_delta_scale=config.get("anchor_delta_scale", 1.5),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

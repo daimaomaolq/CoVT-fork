@@ -33,18 +33,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--num-region-queries", type=int, default=8)
+    parser.add_argument("--num-region-queries", type=int, default=32)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--query-max-len", type=int, default=32)
     parser.add_argument("--query-vocab-size", type=int, default=8192)
     parser.add_argument("--max-sam-tokens", type=int, default=64)
     parser.add_argument("--max-dino-tokens", type=int, default=2048)
-    parser.add_argument("--rank-loss-weight", type=float, default=0.2)
-    parser.add_argument("--scale-loss-weight", type=float, default=0.1)
-    parser.add_argument("--aux-bbox-loss-weight", type=float, default=0.2)
+    parser.add_argument("--anchor-delta-scale", type=float, default=1.5)
+    parser.add_argument("--rank-loss-weight", type=float, default=0.3)
+    parser.add_argument("--scale-loss-weight", type=float, default=0.05)
+    parser.add_argument("--aux-bbox-loss-weight", type=float, default=0.05)
     parser.add_argument("--center-size-loss-weight", type=float, default=0.5)
-    parser.add_argument("--score-loss-weight", type=float, default=0.1)
-    parser.add_argument("--bbox-logit-loss-weight", type=float, default=1.0)
+    parser.add_argument("--score-loss-weight", type=float, default=0.2)
+    parser.add_argument("--giou-loss-weight", type=float, default=1.0)
+    parser.add_argument("--delta-loss-weight", type=float, default=0.005)
+    parser.add_argument(
+        "--bbox-logit-loss-weight",
+        type=float,
+        default=0.0,
+        help="Deprecated compatibility flag. v4 uses anchor-delta boxes instead of bbox logits.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     return parser.parse_args()
 
@@ -74,6 +82,27 @@ def box_iou_xyxy(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     area1 = (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0) * (boxes1[:, 3] - boxes1[:, 1]).clamp(min=0)
     area2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0) * (boxes2[:, 3] - boxes2[:, 1]).clamp(min=0)
     return inter / (area1 + area2 - inter).clamp(min=1e-6)
+
+
+def box_area_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    return (boxes[..., 2] - boxes[..., 0]).clamp(min=0) * (boxes[..., 3] - boxes[..., 1]).clamp(min=0)
+
+
+def generalized_box_iou_xyxy(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    lt = torch.maximum(boxes1[:, :2], boxes2[:, :2])
+    rb = torch.minimum(boxes1[:, 2:], boxes2[:, 2:])
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[:, 0] * wh[:, 1]
+    area1 = box_area_xyxy(boxes1)
+    area2 = box_area_xyxy(boxes2)
+    union = (area1 + area2 - inter).clamp(min=1e-6)
+    iou = inter / union
+
+    enclosing_lt = torch.minimum(boxes1[:, :2], boxes2[:, :2])
+    enclosing_rb = torch.maximum(boxes1[:, 2:], boxes2[:, 2:])
+    enclosing_wh = (enclosing_rb - enclosing_lt).clamp(min=0)
+    enclosing_area = (enclosing_wh[:, 0] * enclosing_wh[:, 1]).clamp(min=1e-6)
+    return iou - (enclosing_area - union) / enclosing_area
 
 
 def normalize_box_order(boxes: torch.Tensor) -> torch.Tensor:
@@ -109,8 +138,24 @@ def candidate_l1_distance(candidate_boxes: torch.Tensor, target_boxes: torch.Ten
     return torch.abs(candidate_boxes - target_boxes.unsqueeze(1)).mean(dim=-1)
 
 
-def soft_score_targets(candidate_dist: torch.Tensor) -> torch.Tensor:
-    return torch.exp(-candidate_dist.detach() * 12.0).clamp(min=0.0, max=1.0)
+def anchor_score_targets(anchor_dist: torch.Tensor, best_idx: torch.Tensor) -> torch.Tensor:
+    targets = torch.exp(-anchor_dist.detach() * 12.0).clamp(min=0.0, max=0.75)
+    targets.scatter_(1, best_idx.unsqueeze(1), 1.0)
+    return targets
+
+
+def weighted_aux_bbox_loss(
+    candidate_boxes: torch.Tensor,
+    target_boxes: torch.Tensor,
+    anchor_dist: torch.Tensor,
+) -> torch.Tensor:
+    per_candidate_loss = F.smooth_l1_loss(
+        candidate_boxes,
+        target_boxes.unsqueeze(1).expand_as(candidate_boxes),
+        reduction="none",
+    ).mean(dim=-1)
+    weights = torch.exp(-anchor_dist.detach() * 10.0)
+    return (per_candidate_loss * weights).sum() / weights.sum().clamp(min=1.0)
 
 
 @torch.no_grad()
@@ -204,6 +249,7 @@ def main() -> None:
         query_vocab_size=args.query_vocab_size,
         max_sam_tokens=args.max_sam_tokens,
         max_dino_tokens=args.max_dino_tokens,
+        anchor_delta_scale=args.anchor_delta_scale,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -212,6 +258,16 @@ def main() -> None:
         model.train()
         total = 0
         loss_sum = 0.0
+        component_sums = {
+            "bbox_loss": 0.0,
+            "giou_loss": 0.0,
+            "aux_bbox_loss": 0.0,
+            "center_size_loss": 0.0,
+            "score_loss": 0.0,
+            "rank_loss": 0.0,
+            "scale_loss": 0.0,
+            "delta_loss": 0.0,
+        }
         for batch in train_loader:
             sam_tokens = batch["sam_tokens"].to(device)
             dino_tokens = batch["dino_tokens"].to(device)
@@ -220,36 +276,34 @@ def main() -> None:
             scale_label = batch["scale_label"].to(device)
             pred = model(sam_tokens, dino_tokens, query_tokens=query_tokens)
             candidates = normalize_box_order(pred["candidate_bboxes"])
-            candidate_logits = pred["candidate_bbox_logits"]
-            candidate_dist = candidate_l1_distance(candidates, bbox)
-            best_idx = candidate_dist.detach().argmin(dim=1)
+            anchors = pred["anchor_boxes"].unsqueeze(0).expand_as(candidates)
+            anchor_dist = candidate_l1_distance(anchors, bbox)
+            anchor_iou = candidate_iou_xyxy(anchors, bbox)
+            anchor_cost = anchor_dist - anchor_iou * 0.25
+            best_idx = anchor_cost.detach().argmin(dim=1)
             batch_indices = torch.arange(bbox.shape[0], device=device)
             matched_bbox = candidates[batch_indices, best_idx]
-            matched_logits = candidate_logits[batch_indices, best_idx]
             bbox_loss = F.smooth_l1_loss(matched_bbox, bbox)
-            bbox_logit_loss = F.binary_cross_entropy_with_logits(matched_logits, bbox)
-            aux_bbox_logit_loss = F.binary_cross_entropy_with_logits(
-                candidate_logits,
-                bbox.unsqueeze(1).expand_as(candidate_logits),
-            )
-            aux_bbox_loss = F.smooth_l1_loss(candidates, bbox.unsqueeze(1).expand_as(candidates))
+            giou_loss = 1.0 - generalized_box_iou_xyxy(matched_bbox, bbox).mean()
+            aux_bbox_loss = weighted_aux_bbox_loss(candidates, bbox, anchor_dist)
             center_size_loss = F.smooth_l1_loss(box_cxcywh(matched_bbox), box_cxcywh(bbox))
             rank_loss = F.cross_entropy(pred["candidate_scores"], best_idx)
             matched_scale_logits = pred["candidate_scale_logits"][batch_indices, best_idx]
             scale_loss = F.cross_entropy(matched_scale_logits, scale_label)
             score_loss = F.binary_cross_entropy_with_logits(
                 pred["candidate_scores"],
-                soft_score_targets(candidate_dist),
+                anchor_score_targets(anchor_dist, best_idx),
             )
+            delta_loss = pred["candidate_bbox_deltas"].pow(2).mean()
             loss = (
                 bbox_loss
-                + args.bbox_logit_loss_weight * bbox_logit_loss
+                + args.giou_loss_weight * giou_loss
                 + args.aux_bbox_loss_weight * aux_bbox_loss
-                + args.aux_bbox_loss_weight * aux_bbox_logit_loss
                 + args.center_size_loss_weight * center_size_loss
                 + args.score_loss_weight * score_loss
                 + args.rank_loss_weight * rank_loss
                 + args.scale_loss_weight * scale_loss
+                + args.delta_loss_weight * delta_loss
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -259,8 +313,21 @@ def main() -> None:
             batch_size = bbox.shape[0]
             total += batch_size
             loss_sum += float(loss.detach().cpu()) * batch_size
+            component_values = {
+                "bbox_loss": bbox_loss,
+                "giou_loss": giou_loss,
+                "aux_bbox_loss": aux_bbox_loss,
+                "center_size_loss": center_size_loss,
+                "score_loss": score_loss,
+                "rank_loss": rank_loss,
+                "scale_loss": scale_loss,
+                "delta_loss": delta_loss,
+            }
+            for key, value in component_values.items():
+                component_sums[key] += float(value.detach().cpu()) * batch_size
 
         row = {"epoch": epoch, "train_loss": loss_sum / max(total, 1)}
+        row.update({f"train_{key}": value / max(total, 1) for key, value in component_sums.items()})
         if val_loader is not None:
             row.update({f"val_{key}": value for key, value in evaluate(model, val_loader, device).items()})
         history.append(row)
@@ -279,6 +346,7 @@ def main() -> None:
             "query_max_len": args.query_max_len,
             "max_sam_tokens": args.max_sam_tokens,
             "max_dino_tokens": args.max_dino_tokens,
+            "anchor_delta_scale": args.anchor_delta_scale,
         },
         "history": history,
         "args": vars(args),
