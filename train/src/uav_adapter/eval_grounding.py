@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 
 from uav_adapter.dataset import TokenGroundingDataset
 from uav_adapter.model import UAVPerceptionAdapter
-from uav_adapter.train_adapter import box_iou_xyxy, collate, normalize_box_order, resolve_device
+from uav_adapter.train_adapter import (
+    box_iou_xyxy,
+    candidate_iou_xyxy,
+    collate,
+    normalize_box_order,
+    resolve_device,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +72,8 @@ def main() -> None:
     acc50 = 0.0
     acc75 = 0.0
     recall3 = 0.0
+    oracle_iou_sum = 0.0
+    oracle_acc50 = 0.0
     with torch.no_grad():
         pred_handle = pred_path.open("w", encoding="utf-8") if pred_path is not None else None
         try:
@@ -79,10 +87,9 @@ def main() -> None:
                 candidates = normalize_box_order(output["candidate_bboxes"])
                 topk_bboxes = normalize_box_order(output["topk_bboxes"])
                 iou = box_iou_xyxy(bbox, target)
-                candidate_iou = []
-                for region_idx in range(candidates.shape[1]):
-                    candidate_iou.append(box_iou_xyxy(candidates[:, region_idx], target))
-                candidate_iou = torch.stack(candidate_iou, dim=1)
+                candidate_iou = candidate_iou_xyxy(candidates, target)
+                oracle_iou, oracle_idx = candidate_iou.max(dim=1)
+                oracle_bbox = candidates[torch.arange(candidates.shape[0], device=device), oracle_idx]
                 topk_count = min(3, candidate_iou.shape[1])
                 topk_indices = torch.topk(output["candidate_scores"], k=topk_count, dim=1).indices
                 topk_iou = candidate_iou.gather(dim=1, index=topk_indices)
@@ -91,14 +98,18 @@ def main() -> None:
                 acc50 += float((iou >= 0.5).sum().cpu())
                 acc75 += float((iou >= 0.75).sum().cpu())
                 recall3 += float((topk_iou >= 0.5).any(dim=1).sum().cpu())
+                oracle_iou_sum += float(oracle_iou.sum().cpu())
+                oracle_acc50 += float((oracle_iou >= 0.5).sum().cpu())
                 if pred_handle is not None:
-                    for sample_id, pred_bbox, top_bboxes, top_scores, score, item_iou in zip(
+                    for sample_id, pred_bbox, top_bboxes, top_scores, best_oracle_bbox, score, item_iou, item_oracle_iou in zip(
                         batch["sample_id"],
                         bbox.cpu().tolist(),
                         topk_bboxes.cpu().tolist(),
                         output["topk_scores"].cpu().tolist(),
+                        oracle_bbox.cpu().tolist(),
                         output["score"].cpu().tolist(),
                         iou.cpu().tolist(),
+                        oracle_iou.cpu().tolist(),
                     ):
                         pred_handle.write(
                             json.dumps(
@@ -107,8 +118,10 @@ def main() -> None:
                                     "bbox": pred_bbox,
                                     "topk_bboxes": top_bboxes,
                                     "topk_scores": top_scores,
+                                    "oracle_bbox": best_oracle_bbox,
                                     "score": score,
                                     "iou": item_iou,
+                                    "oracle_iou": item_oracle_iou,
                                 },
                                 ensure_ascii=False,
                             )
@@ -126,6 +139,8 @@ def main() -> None:
                 "Acc@0.5": acc50 / max(total, 1),
                 "Acc@0.75": acc75 / max(total, 1),
                 "Recall@3": recall3 / max(total, 1),
+                "Oracle_mIoU": oracle_iou_sum / max(total, 1),
+                "Oracle_Acc@0.5": oracle_acc50 / max(total, 1),
                 "predictions": str(pred_path) if pred_path is not None else None,
             },
             indent=2,

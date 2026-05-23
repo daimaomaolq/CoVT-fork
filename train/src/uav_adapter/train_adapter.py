@@ -39,6 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query-vocab-size", type=int, default=8192)
     parser.add_argument("--rank-loss-weight", type=float, default=0.2)
     parser.add_argument("--scale-loss-weight", type=float, default=0.1)
+    parser.add_argument("--aux-bbox-loss-weight", type=float, default=0.2)
+    parser.add_argument("--center-size-loss-weight", type=float, default=0.5)
+    parser.add_argument("--score-loss-weight", type=float, default=0.1)
     parser.add_argument("--num-workers", type=int, default=0)
     return parser.parse_args()
 
@@ -93,6 +96,20 @@ def candidate_iou_xyxy(candidate_boxes: torch.Tensor, target_boxes: torch.Tensor
     return inter / (area1 + area2 - inter).clamp(min=1e-6)
 
 
+def box_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
+    center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
+    size = (boxes[..., 2:] - boxes[..., :2]).clamp(min=0)
+    return torch.cat([center, size], dim=-1)
+
+
+def candidate_l1_distance(candidate_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
+    return torch.abs(candidate_boxes - target_boxes.unsqueeze(1)).mean(dim=-1)
+
+
+def soft_score_targets(candidate_dist: torch.Tensor) -> torch.Tensor:
+    return torch.exp(-candidate_dist.detach() * 12.0).clamp(min=0.0, max=1.0)
+
+
 @torch.no_grad()
 def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.device) -> dict[str, float]:
     model.eval()
@@ -101,6 +118,8 @@ def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.devi
     iou_sum = 0.0
     acc50 = 0.0
     recall3 = 0.0
+    oracle_iou_sum = 0.0
+    oracle_acc50 = 0.0
     for batch in loader:
         sam_tokens = batch["sam_tokens"].to(device)
         dino_tokens = batch["dino_tokens"].to(device)
@@ -112,6 +131,7 @@ def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.devi
         loss = F.l1_loss(pred_bbox, bbox, reduction="sum")
         iou = box_iou_xyxy(pred_bbox, bbox)
         candidate_iou = candidate_iou_xyxy(candidates, bbox)
+        oracle_iou = candidate_iou.max(dim=1).values
         topk_count = min(3, candidate_iou.shape[1])
         topk_indices = torch.topk(pred["candidate_scores"], k=topk_count, dim=1).indices
         topk_iou = candidate_iou.gather(dim=1, index=topk_indices)
@@ -121,11 +141,15 @@ def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.devi
         iou_sum += float(iou.sum().detach().cpu())
         acc50 += float((iou >= 0.5).sum().detach().cpu())
         recall3 += float((topk_iou >= 0.5).any(dim=1).sum().detach().cpu())
+        oracle_iou_sum += float(oracle_iou.sum().detach().cpu())
+        oracle_acc50 += float((oracle_iou >= 0.5).sum().detach().cpu())
     return {
         "l1": loss_sum / max(total, 1),
         "miou": iou_sum / max(total, 1),
         "acc50": acc50 / max(total, 1),
         "recall3": recall3 / max(total, 1),
+        "oracle_miou": oracle_iou_sum / max(total, 1),
+        "oracle_acc50": oracle_acc50 / max(total, 1),
     }
 
 
@@ -191,19 +215,25 @@ def main() -> None:
             scale_label = batch["scale_label"].to(device)
             pred = model(sam_tokens, dino_tokens, query_tokens=query_tokens)
             candidates = normalize_box_order(pred["candidate_bboxes"])
-            candidate_iou = candidate_iou_xyxy(candidates, bbox)
-            best_idx = candidate_iou.detach().argmax(dim=1)
+            candidate_dist = candidate_l1_distance(candidates, bbox)
+            best_idx = candidate_dist.detach().argmin(dim=1)
             batch_indices = torch.arange(bbox.shape[0], device=device)
             matched_bbox = candidates[batch_indices, best_idx]
             bbox_loss = F.smooth_l1_loss(matched_bbox, bbox)
+            aux_bbox_loss = F.smooth_l1_loss(candidates, bbox.unsqueeze(1).expand_as(candidates))
+            center_size_loss = F.smooth_l1_loss(box_cxcywh(matched_bbox), box_cxcywh(bbox))
             rank_loss = F.cross_entropy(pred["candidate_scores"], best_idx)
             matched_scale_logits = pred["candidate_scale_logits"][batch_indices, best_idx]
             scale_loss = F.cross_entropy(matched_scale_logits, scale_label)
-            score_target = torch.ones_like(pred["score"])
-            score_loss = F.binary_cross_entropy_with_logits(pred["score"], score_target)
+            score_loss = F.binary_cross_entropy_with_logits(
+                pred["candidate_scores"],
+                soft_score_targets(candidate_dist),
+            )
             loss = (
                 bbox_loss
-                + 0.1 * score_loss
+                + args.aux_bbox_loss_weight * aux_bbox_loss
+                + args.center_size_loss_weight * center_size_loss
+                + args.score_loss_weight * score_loss
                 + args.rank_loss_weight * rank_loss
                 + args.scale_loss_weight * scale_loss
             )
