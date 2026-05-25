@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--query-max-len", type=int, default=32)
     parser.add_argument("--query-vocab-size", type=int, default=8192)
+    parser.add_argument("--query-encoder-type", default="transformer", choices=("mean", "transformer"))
+    parser.add_argument("--query-layers", type=int, default=2)
+    parser.add_argument("--category-vocab-size", type=int, default=32)
+    parser.add_argument("--region-vocab-size", type=int, default=64)
+    parser.add_argument("--rule-vocab-size", type=int, default=256)
+    parser.add_argument("--disable-query-metadata", action="store_true")
     parser.add_argument("--max-sam-tokens", type=int, default=64)
     parser.add_argument("--max-dino-tokens", type=int, default=2048)
     parser.add_argument("--anchor-delta-scale", type=float, default=1.0)
@@ -71,6 +77,9 @@ def collate(batch):
         "sam_tokens": torch.stack([item["sam_tokens"] for item in batch]),
         "dino_tokens": torch.stack([item["dino_tokens"] for item in batch]),
         "query_tokens": torch.stack([item["query_tokens"] for item in batch]),
+        "category_id": torch.stack([item["category_id"] for item in batch]),
+        "region_id": torch.stack([item["region_id"] for item in batch]),
+        "query_rule_id": torch.stack([item["query_rule_id"] for item in batch]),
         "scale_label": torch.stack([item["scale_label"] for item in batch]),
         "bbox": torch.stack([item["bbox"] for item in batch]),
     }
@@ -190,8 +199,20 @@ def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.devi
         sam_tokens = batch["sam_tokens"].to(device)
         dino_tokens = batch["dino_tokens"].to(device)
         query_tokens = batch["query_tokens"].to(device)
+        category_id = batch["category_id"].to(device)
+        region_id = batch["region_id"].to(device)
+        query_rule_id = batch["query_rule_id"].to(device)
         bbox = batch["bbox"].to(device)
-        pred = model(sam_tokens, dino_tokens, query_tokens=query_tokens)
+        scale_label = batch["scale_label"].to(device)
+        pred = model(
+            sam_tokens,
+            dino_tokens,
+            query_tokens=query_tokens,
+            category_ids=category_id,
+            scale_labels=scale_label,
+            region_ids=region_id,
+            rule_ids=query_rule_id,
+        )
         pred_bbox = normalize_box_order(pred["bbox"])
         candidates = normalize_box_order(pred["candidate_bboxes"])
         loss = F.l1_loss(pred_bbox, bbox, reduction="sum")
@@ -231,6 +252,8 @@ def main() -> None:
         bbox_key=args.bbox_key,
         query_max_len=args.query_max_len,
         query_vocab_size=args.query_vocab_size,
+        region_vocab_size=args.region_vocab_size,
+        rule_vocab_size=args.rule_vocab_size,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -247,6 +270,8 @@ def main() -> None:
             bbox_key=args.bbox_key,
             query_max_len=args.query_max_len,
             query_vocab_size=args.query_vocab_size,
+            region_vocab_size=args.region_vocab_size,
+            rule_vocab_size=args.rule_vocab_size,
         )
         val_loader = DataLoader(
             val_dataset,
@@ -265,6 +290,14 @@ def main() -> None:
         num_region_queries=args.num_region_queries,
         num_heads=args.num_heads,
         query_vocab_size=args.query_vocab_size,
+        query_encoder_type=args.query_encoder_type,
+        query_layers=args.query_layers,
+        max_query_tokens=args.query_max_len,
+        category_vocab_size=args.category_vocab_size,
+        region_vocab_size=args.region_vocab_size,
+        rule_vocab_size=args.rule_vocab_size,
+        use_query_metadata=not args.disable_query_metadata,
+        use_output_query_proj=True,
         max_sam_tokens=args.max_sam_tokens,
         max_dino_tokens=args.max_dino_tokens,
         anchor_delta_scale=args.anchor_delta_scale,
@@ -292,9 +325,20 @@ def main() -> None:
             sam_tokens = batch["sam_tokens"].to(device)
             dino_tokens = batch["dino_tokens"].to(device)
             query_tokens = batch["query_tokens"].to(device)
+            category_id = batch["category_id"].to(device)
+            region_id = batch["region_id"].to(device)
+            query_rule_id = batch["query_rule_id"].to(device)
             bbox = batch["bbox"].to(device)
             scale_label = batch["scale_label"].to(device)
-            pred = model(sam_tokens, dino_tokens, query_tokens=query_tokens)
+            pred = model(
+                sam_tokens,
+                dino_tokens,
+                query_tokens=query_tokens,
+                category_ids=category_id,
+                scale_labels=scale_label,
+                region_ids=region_id,
+                rule_ids=query_rule_id,
+            )
             candidates = normalize_box_order(pred["candidate_bboxes"])
             anchors = pred["anchor_boxes"].unsqueeze(0).expand_as(candidates)
             anchor_dist = candidate_l1_distance(anchors, bbox)
@@ -370,6 +414,13 @@ def main() -> None:
             "num_heads": args.num_heads,
             "query_vocab_size": args.query_vocab_size,
             "query_max_len": args.query_max_len,
+            "query_encoder_type": args.query_encoder_type,
+            "query_layers": args.query_layers,
+            "category_vocab_size": args.category_vocab_size,
+            "region_vocab_size": args.region_vocab_size,
+            "rule_vocab_size": args.rule_vocab_size,
+            "use_query_metadata": not args.disable_query_metadata,
+            "use_output_query_proj": True,
             "max_sam_tokens": args.max_sam_tokens,
             "max_dino_tokens": args.max_dino_tokens,
             "anchor_delta_scale": args.anchor_delta_scale,

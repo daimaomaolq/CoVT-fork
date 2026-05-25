@@ -44,12 +44,16 @@ class TokenGroundingDataset(Dataset):
         bbox_key: str = "bbox_norm",
         query_max_len: int = 32,
         query_vocab_size: int = 8192,
+        region_vocab_size: int = 64,
+        rule_vocab_size: int = 256,
     ) -> None:
         self.index_path = Path(index_path).expanduser().resolve()
         self.token_dir = Path(token_dir).expanduser().resolve()
         self.bbox_key = bbox_key
         self.query_max_len = query_max_len
         self.query_vocab_size = query_vocab_size
+        self.region_vocab_size = region_vocab_size
+        self.rule_vocab_size = rule_vocab_size
         self.records = self._read_index()
 
     def _read_index(self) -> list[dict[str, Any]]:
@@ -75,13 +79,21 @@ class TokenGroundingDataset(Dataset):
         return len(self.records)
 
     def _query_token_ids(self, text: str) -> torch.Tensor:
-        words = re.findall(r"[a-z0-9]+", text.lower())
+        words = re.findall(r"[a-z0-9_]+", text.lower())
         ids = torch.zeros(self.query_max_len, dtype=torch.long)
         for index, word in enumerate(words[: self.query_max_len]):
             digest = blake2b(word.encode("utf-8"), digest_size=4).digest()
             value = int.from_bytes(digest, byteorder="little")
             ids[index] = value % (self.query_vocab_size - 1) + 1
         return ids
+
+    @staticmethod
+    def _field_id(text: str, vocab_size: int) -> torch.Tensor:
+        if not text or vocab_size <= 1:
+            return torch.tensor(0, dtype=torch.long)
+        digest = blake2b(text.lower().encode("utf-8"), digest_size=4).digest()
+        value = int.from_bytes(digest, byteorder="little")
+        return torch.tensor(value % (vocab_size - 1) + 1, dtype=torch.long)
 
     @staticmethod
     def _scale_label(bbox: list[float]) -> int:
@@ -100,12 +112,16 @@ class TokenGroundingDataset(Dataset):
         cache = torch.load(token_path, map_location="cpu")
         bbox = [float(value) for value in row[self.bbox_key]]
         query = row.get("query", "")
+        category_id = int(row.get("category_id", 0))
         return {
             "sample_id": row["sample_id"],
             "sam_tokens": _token_tensor(cache, "sam", "attended"),
             "dino_tokens": _token_tensor(cache, "dino", "attended"),
             "bbox": torch.tensor(bbox, dtype=torch.float32),
             "query_tokens": self._query_token_ids(query),
+            "category_id": torch.tensor(max(category_id, 0), dtype=torch.long),
+            "region_id": self._field_id(str(row.get("region", "")), self.region_vocab_size),
+            "query_rule_id": self._field_id(str(row.get("query_rule", "")), self.rule_vocab_size),
             "scale_label": torch.tensor(self._scale_label(bbox), dtype=torch.long),
             "query": query,
             "image": row.get("image", ""),

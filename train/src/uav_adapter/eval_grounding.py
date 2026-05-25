@@ -42,12 +42,20 @@ def main() -> None:
     device = resolve_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     config = checkpoint["config"]
+    use_query_metadata = config.get("use_query_metadata")
+    if use_query_metadata is None:
+        use_query_metadata = any(key.startswith("metadata_encoder.") for key in checkpoint["model"])
+    use_output_query_proj = config.get("use_output_query_proj")
+    if use_output_query_proj is None:
+        use_output_query_proj = any(key.startswith("output_query_proj.") for key in checkpoint["model"])
     dataset = TokenGroundingDataset(
         args.index,
         args.token_dir,
         bbox_key=args.bbox_key,
         query_max_len=config.get("query_max_len", 32),
         query_vocab_size=config.get("query_vocab_size", 8192),
+        region_vocab_size=config.get("region_vocab_size", 64),
+        rule_vocab_size=config.get("rule_vocab_size", 256),
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
 
@@ -59,11 +67,38 @@ def main() -> None:
         num_region_queries=config.get("num_region_queries", 8),
         num_heads=config.get("num_heads", 8),
         query_vocab_size=config.get("query_vocab_size", 8192),
+        query_encoder_type=config.get("query_encoder_type", "mean"),
+        query_layers=config.get("query_layers", 2),
+        max_query_tokens=config.get("query_max_len", 32),
+        category_vocab_size=config.get("category_vocab_size", 32),
+        region_vocab_size=config.get("region_vocab_size", 64),
+        rule_vocab_size=config.get("rule_vocab_size", 256),
+        use_query_metadata=use_query_metadata,
+        use_output_query_proj=use_output_query_proj,
         max_sam_tokens=config.get("max_sam_tokens", 64),
         max_dino_tokens=config.get("max_dino_tokens", 2048),
         anchor_delta_scale=config.get("anchor_delta_scale", 1.5),
     ).to(device)
-    model.load_state_dict(checkpoint["model"])
+    load_result = model.load_state_dict(checkpoint["model"], strict=False)
+    allowed_missing_prefixes = []
+    if config.get("query_encoder_type", "mean") != "transformer":
+        allowed_missing_prefixes.extend(("query_position", "query_transformer."))
+    if not use_query_metadata:
+        allowed_missing_prefixes.extend(
+            ("category_embedding.", "scale_embedding.", "region_embedding.", "rule_embedding.", "metadata_encoder.")
+        )
+    if not use_output_query_proj:
+        allowed_missing_prefixes.append("output_query_proj.")
+    bad_missing = [
+        key
+        for key in load_result.missing_keys
+        if not any(key == prefix or key.startswith(prefix) for prefix in allowed_missing_prefixes)
+    ]
+    if bad_missing or load_result.unexpected_keys:
+        raise RuntimeError(
+            "Checkpoint state mismatch: "
+            f"missing={bad_missing}, unexpected={list(load_result.unexpected_keys)}"
+        )
     model.eval()
 
     pred_path = Path(args.predictions).expanduser().resolve() if args.predictions else None
@@ -84,8 +119,20 @@ def main() -> None:
                 sam_tokens = batch["sam_tokens"].to(device)
                 dino_tokens = batch["dino_tokens"].to(device)
                 query_tokens = batch["query_tokens"].to(device)
+                category_id = batch["category_id"].to(device)
+                region_id = batch["region_id"].to(device)
+                query_rule_id = batch["query_rule_id"].to(device)
                 target = batch["bbox"].to(device)
-                output = model(sam_tokens, dino_tokens, query_tokens=query_tokens)
+                scale_label = batch["scale_label"].to(device)
+                output = model(
+                    sam_tokens,
+                    dino_tokens,
+                    query_tokens=query_tokens,
+                    category_ids=category_id,
+                    scale_labels=scale_label,
+                    region_ids=region_id,
+                    rule_ids=query_rule_id,
+                )
                 bbox = normalize_box_order(output["bbox"])
                 candidates = normalize_box_order(output["candidate_bboxes"])
                 topk_bboxes = normalize_box_order(output["topk_bboxes"])
