@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query-vocab-size", type=int, default=8192)
     parser.add_argument("--max-sam-tokens", type=int, default=64)
     parser.add_argument("--max-dino-tokens", type=int, default=2048)
-    parser.add_argument("--anchor-delta-scale", type=float, default=1.5)
+    parser.add_argument("--anchor-delta-scale", type=float, default=1.0)
     parser.add_argument("--rank-loss-weight", type=float, default=0.3)
     parser.add_argument("--scale-loss-weight", type=float, default=0.05)
     parser.add_argument("--aux-bbox-loss-weight", type=float, default=0.05)

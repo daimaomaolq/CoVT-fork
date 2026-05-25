@@ -26,7 +26,7 @@ class UAVPerceptionAdapter(nn.Module):
         num_scale_bins: int = 3,
         max_sam_tokens: int = 64,
         max_dino_tokens: int = 2048,
-        anchor_delta_scale: float = 1.5,
+        anchor_delta_scale: float = 1.0,
     ) -> None:
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -93,6 +93,8 @@ class UAVPerceptionAdapter(nn.Module):
         self.bbox_head = nn.Linear(hidden_dim, 4)
         self.score_head = nn.Linear(hidden_dim, 1)
         self.scale_head = nn.Linear(hidden_dim, num_scale_bins)
+        nn.init.zeros_(self.bbox_head.weight)
+        nn.init.zeros_(self.bbox_head.bias)
 
     @staticmethod
     def _make_anchor_boxes(num_boxes: int) -> torch.Tensor:
@@ -154,17 +156,9 @@ class UAVPerceptionAdapter(nn.Module):
 
     def _decode_anchor_deltas(self, deltas: torch.Tensor) -> torch.Tensor:
         anchors = self.anchor_boxes.to(device=deltas.device, dtype=deltas.dtype)
-        anchor_center = (anchors[:, :2] + anchors[:, 2:]) * 0.5
-        anchor_size = (anchors[:, 2:] - anchors[:, :2]).clamp(min=1e-4)
-
-        delta_center = torch.tanh(deltas[..., :2]) * anchor_size.unsqueeze(0) * self.anchor_delta_scale
-        delta_size = torch.tanh(deltas[..., 2:]) * self.anchor_delta_scale
-        pred_center = anchor_center.unsqueeze(0) + delta_center
-        pred_size = anchor_size.unsqueeze(0) * torch.exp(delta_size.clamp(min=-2.0, max=2.0))
-
-        top_left = pred_center - pred_size * 0.5
-        bottom_right = pred_center + pred_size * 0.5
-        return torch.cat([top_left, bottom_right], dim=-1).clamp(min=0.0, max=1.0)
+        anchor_logits = torch.logit(anchors.clamp(min=1e-4, max=1.0 - 1e-4))
+        refined_logits = anchor_logits.unsqueeze(0) + deltas * self.anchor_delta_scale
+        return refined_logits.sigmoid()
 
     def forward(
         self,
