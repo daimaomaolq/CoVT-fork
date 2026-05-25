@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 
+if sys.getrecursionlimit() < 10000:
+    sys.setrecursionlimit(10000)
+
+
 THIS_FILE = Path(__file__).resolve()
 REPO_ROOT = THIS_FILE.parents[3]
 TRAIN_DIR = REPO_ROOT / "train"
