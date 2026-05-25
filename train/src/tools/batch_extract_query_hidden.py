@@ -4,12 +4,73 @@ import argparse
 import json
 import os
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
 
 if sys.getrecursionlimit() < 10000:
     sys.setrecursionlimit(10000)
+
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
+
+
+def patch_transformers_generation_for_extraction() -> None:
+    """Avoid importing transformers.generation.utils for forward-only extraction.
+
+    Some PyTorch/Python 3.12 environments hit a recursive import path inside
+    transformers.generation.utils. Query hidden extraction never calls generate(),
+    so a minimal GenerationMixin/GenerationConfig stub is enough for AutoProcessor
+    and the local CoVT model class definitions.
+    """
+
+    if "transformers.generation" in sys.modules:
+        return
+
+    class GenerationMixin:
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("Generation is disabled in query-hidden extraction.")
+
+    class GenerationConfig:
+        @classmethod
+        def from_model_config(cls, *args, **kwargs):
+            return cls()
+
+        @classmethod
+        def from_pretrained(cls, *args, return_unused_kwargs=False, **kwargs):
+            config = cls()
+            if return_unused_kwargs:
+                return config, {}
+            return config
+
+        def update(self, **kwargs):
+            return {}
+
+        def to_dict(self):
+            return {}
+
+    class CompileConfig:
+        pass
+
+    generation_module = types.ModuleType("transformers.generation")
+    generation_module.__path__ = []
+    generation_module.GenerationMixin = GenerationMixin
+    generation_module.GenerationConfig = GenerationConfig
+    generation_module.CompileConfig = CompileConfig
+
+    generation_utils_module = types.ModuleType("transformers.generation.utils")
+    generation_utils_module.GenerationMixin = GenerationMixin
+
+    generation_config_module = types.ModuleType("transformers.generation.configuration_utils")
+    generation_config_module.GenerationConfig = GenerationConfig
+    generation_config_module.CompileConfig = CompileConfig
+
+    sys.modules["transformers.generation"] = generation_module
+    sys.modules["transformers.generation.utils"] = generation_utils_module
+    sys.modules["transformers.generation.configuration_utils"] = generation_config_module
 
 
 THIS_FILE = Path(__file__).resolve()
@@ -156,6 +217,7 @@ def cast_for_save(tensor, save_dtype: str, torch_module):
 
 def main() -> None:
     args = parse_args()
+    patch_transformers_generation_for_extraction()
     index_path = Path(args.index).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
