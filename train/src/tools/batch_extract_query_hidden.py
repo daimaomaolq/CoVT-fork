@@ -27,7 +27,8 @@ def patch_transformers_generation_for_extraction() -> None:
     and the local CoVT model class definitions.
     """
 
-    if "transformers.generation" in sys.modules:
+    generation_module = sys.modules.get("transformers.generation")
+    if getattr(generation_module, "__uav_forward_only_stub__", False):
         return
 
     class GenerationMixin:
@@ -57,6 +58,7 @@ def patch_transformers_generation_for_extraction() -> None:
 
     generation_module = types.ModuleType("transformers.generation")
     generation_module.__path__ = []
+    generation_module.__uav_forward_only_stub__ = True
     generation_module.GenerationMixin = GenerationMixin
     generation_module.GenerationConfig = GenerationConfig
     generation_module.CompileConfig = CompileConfig
@@ -71,6 +73,9 @@ def patch_transformers_generation_for_extraction() -> None:
     sys.modules["transformers.generation"] = generation_module
     sys.modules["transformers.generation.utils"] = generation_utils_module
     sys.modules["transformers.generation.configuration_utils"] = generation_config_module
+
+
+patch_transformers_generation_for_extraction()
 
 
 THIS_FILE = Path(__file__).resolve()
