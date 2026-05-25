@@ -29,11 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the query-conditioned UAVPerceptionAdapter.")
     parser.add_argument("--index", required=True)
     parser.add_argument("--token-dir", required=True)
+    parser.add_argument("--lm-query-dir", default=None)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--bbox-key", default="bbox_norm")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--predictions", default=None)
+    parser.add_argument("--max-lm-query-tokens", type=int, default=None)
     return parser.parse_args()
 
 
@@ -48,12 +50,17 @@ def main() -> None:
     use_output_query_proj = config.get("use_output_query_proj")
     if use_output_query_proj is None:
         use_output_query_proj = any(key.startswith("output_query_proj.") for key in checkpoint["model"])
+    lm_query_dim = config.get("lm_query_dim", 0)
+    if lm_query_dim > 0 and not args.lm_query_dir:
+        raise ValueError("This checkpoint expects language query hidden states. Pass --lm-query-dir for v8 eval.")
     dataset = TokenGroundingDataset(
         args.index,
         args.token_dir,
+        lm_query_dir=args.lm_query_dir,
         bbox_key=args.bbox_key,
         query_max_len=config.get("query_max_len", 32),
         query_vocab_size=config.get("query_vocab_size", 8192),
+        max_lm_query_tokens=args.max_lm_query_tokens or config.get("max_lm_query_tokens", 64),
         region_vocab_size=config.get("region_vocab_size", 64),
         rule_vocab_size=config.get("rule_vocab_size", 256),
     )
@@ -70,6 +77,8 @@ def main() -> None:
         query_encoder_type=config.get("query_encoder_type", "mean"),
         query_layers=config.get("query_layers", 2),
         max_query_tokens=config.get("query_max_len", 32),
+        lm_query_dim=lm_query_dim,
+        max_lm_query_tokens=config.get("max_lm_query_tokens", 64),
         category_vocab_size=config.get("category_vocab_size", 32),
         region_vocab_size=config.get("region_vocab_size", 64),
         rule_vocab_size=config.get("rule_vocab_size", 256),
@@ -89,6 +98,10 @@ def main() -> None:
         )
     if not use_output_query_proj:
         allowed_missing_prefixes.append("output_query_proj.")
+    if lm_query_dim <= 0:
+        allowed_missing_prefixes.extend(
+            ("lm_query_position", "lm_query_proj.", "lm_query_pool.", "region_to_lm.", "lm_region_ffn.")
+        )
     bad_missing = [
         key
         for key in load_result.missing_keys
@@ -119,6 +132,11 @@ def main() -> None:
                 sam_tokens = batch["sam_tokens"].to(device)
                 dino_tokens = batch["dino_tokens"].to(device)
                 query_tokens = batch["query_tokens"].to(device)
+                lm_query_hidden = batch.get("lm_query_hidden")
+                lm_query_mask = batch.get("lm_query_mask")
+                if lm_query_hidden is not None:
+                    lm_query_hidden = lm_query_hidden.to(device)
+                    lm_query_mask = lm_query_mask.to(device)
                 category_id = batch["category_id"].to(device)
                 region_id = batch["region_id"].to(device)
                 query_rule_id = batch["query_rule_id"].to(device)
@@ -128,6 +146,8 @@ def main() -> None:
                     sam_tokens,
                     dino_tokens,
                     query_tokens=query_tokens,
+                    lm_query_hidden=lm_query_hidden,
+                    lm_query_mask=lm_query_mask,
                     category_ids=category_id,
                     scale_labels=scale_label,
                     region_ids=region_id,

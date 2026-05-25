@@ -29,6 +29,8 @@ class UAVPerceptionAdapter(nn.Module):
         max_sam_tokens: int = 64,
         max_dino_tokens: int = 2048,
         max_query_tokens: int = 64,
+        lm_query_dim: int = 0,
+        max_lm_query_tokens: int = 64,
         category_vocab_size: int = 32,
         region_vocab_size: int = 64,
         rule_vocab_size: int = 256,
@@ -46,6 +48,8 @@ class UAVPerceptionAdapter(nn.Module):
         self.max_sam_tokens = max_sam_tokens
         self.max_dino_tokens = max_dino_tokens
         self.max_query_tokens = max_query_tokens
+        self.lm_query_dim = lm_query_dim
+        self.max_lm_query_tokens = max_lm_query_tokens
         self.query_encoder_type = query_encoder_type
         self.use_query_metadata = use_query_metadata
         self.use_output_query_proj = use_output_query_proj
@@ -93,6 +97,42 @@ class UAVPerceptionAdapter(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
         )
+        if lm_query_dim > 0:
+            self.lm_query_position = nn.Parameter(torch.randn(max_lm_query_tokens, hidden_dim) * 0.01)
+            self.lm_query_proj = nn.Sequential(
+                nn.LayerNorm(lm_query_dim),
+                nn.Linear(lm_query_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.lm_query_pool = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.region_to_lm = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.lm_region_ffn = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim * 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+            )
+        else:
+            self.lm_query_position = None
+            self.lm_query_proj = None
+            self.lm_query_pool = None
+            self.region_to_lm = None
+            self.lm_region_ffn = None
 
         self.sam_type = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.dino_type = nn.Parameter(torch.zeros(1, 1, hidden_dim))
@@ -174,6 +214,11 @@ class UAVPerceptionAdapter(nn.Module):
     def _query_position_encoding(self, token_count: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         return self._position_encoding(self.query_position, token_count).to(device=device, dtype=dtype)
 
+    def _lm_query_position_encoding(self, token_count: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        if self.lm_query_position is None:
+            raise RuntimeError("Language query position encoding requested but lm_query_dim is disabled.")
+        return self._position_encoding(self.lm_query_position, token_count).to(device=device, dtype=dtype)
+
     def _encode_query(
         self,
         query_tokens: torch.Tensor | None,
@@ -232,6 +277,49 @@ class UAVPerceptionAdapter(nn.Module):
         )
         return text_context + self.metadata_encoder(metadata_context)
 
+    def _encode_lm_query(
+        self,
+        lm_query_hidden: torch.Tensor | None,
+        lm_query_mask: torch.Tensor | None,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        if self.lm_query_proj is None or self.lm_query_pool is None or lm_query_hidden is None:
+            return None, None, None
+
+        dtype = next(self.lm_query_proj.parameters()).dtype
+        lm_query_hidden = lm_query_hidden.to(device=device, dtype=dtype)
+        if lm_query_hidden.ndim != 3:
+            raise ValueError(f"Expected lm_query_hidden shape [batch, tokens, dim], got {list(lm_query_hidden.shape)}")
+        if lm_query_hidden.shape[0] != batch_size:
+            raise ValueError(
+                f"lm_query_hidden batch size {lm_query_hidden.shape[0]} does not match visual batch size {batch_size}"
+            )
+
+        if lm_query_mask is None:
+            lm_query_mask = torch.ones(
+                lm_query_hidden.shape[:2],
+                dtype=torch.bool,
+                device=device,
+            )
+        else:
+            lm_query_mask = lm_query_mask.to(device=device, dtype=torch.bool)
+        if lm_query_mask.shape != lm_query_hidden.shape[:2]:
+            raise ValueError(
+                "lm_query_mask shape must match lm_query_hidden[:2], "
+                f"got {list(lm_query_mask.shape)} vs {list(lm_query_hidden.shape[:2])}"
+            )
+        if not bool(lm_query_mask.any(dim=1).all()):
+            lm_query_mask = lm_query_mask.clone()
+            lm_query_mask[~lm_query_mask.any(dim=1), 0] = True
+
+        lm_tokens = self.lm_query_proj(lm_query_hidden)
+        lm_tokens = lm_tokens + self._lm_query_position_encoding(lm_tokens.shape[1], lm_tokens.dtype, device)
+        lengths = lm_query_mask.unsqueeze(-1).sum(dim=1).clamp(min=1)
+        pooled = (lm_tokens * lm_query_mask.unsqueeze(-1)).sum(dim=1) / lengths
+        lm_context = self.lm_query_pool(pooled)
+        return lm_tokens, lm_query_mask, lm_context
+
     def _position_encoding(self, table: torch.Tensor, token_count: int) -> torch.Tensor:
         if token_count <= table.shape[0]:
             return table[:token_count].unsqueeze(0)
@@ -255,6 +343,8 @@ class UAVPerceptionAdapter(nn.Module):
         sam_tokens: torch.Tensor,
         dino_tokens: torch.Tensor,
         query_tokens: torch.Tensor | None = None,
+        lm_query_hidden: torch.Tensor | None = None,
+        lm_query_mask: torch.Tensor | None = None,
         category_ids: torch.Tensor | None = None,
         scale_labels: torch.Tensor | None = None,
         region_ids: torch.Tensor | None = None,
@@ -278,9 +368,27 @@ class UAVPerceptionAdapter(nn.Module):
             region_ids=region_ids,
             rule_ids=rule_ids,
         )
+        lm_tokens, lm_mask, lm_context = self._encode_lm_query(
+            lm_query_hidden,
+            lm_query_mask,
+            batch_size,
+            device,
+        )
+        if lm_context is not None:
+            query_context = query_context + lm_context
         region_queries = self.region_queries.unsqueeze(0).expand(batch_size, -1, -1)
         anchor_context = self.anchor_encoder(self.anchor_boxes.to(device=device, dtype=region_queries.dtype))
         region_queries = region_queries + query_context.unsqueeze(1) + anchor_context.unsqueeze(0)
+        if lm_tokens is not None and lm_mask is not None and self.region_to_lm is not None and self.lm_region_ffn is not None:
+            lm_attended, _ = self.region_to_lm(
+                query=region_queries,
+                key=lm_tokens,
+                value=lm_tokens,
+                key_padding_mask=~lm_mask,
+                need_weights=False,
+            )
+            region_queries = region_queries + lm_attended
+            region_queries = region_queries + self.lm_region_ffn(region_queries)
 
         attended, attn_weights = self.query_to_visual(
             query=region_queries,

@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-index", required=True)
     parser.add_argument("--val-index", default=None)
     parser.add_argument("--token-dir", required=True)
+    parser.add_argument("--lm-query-dir", default=None)
     parser.add_argument("--output-dir", default="/root/autodl-tmp/checkpoints/uav_adapter")
     parser.add_argument("--bbox-key", default="bbox_norm")
     parser.add_argument("--device", default="auto")
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--query-max-len", type=int, default=32)
     parser.add_argument("--query-vocab-size", type=int, default=8192)
+    parser.add_argument("--max-lm-query-tokens", type=int, default=64)
     parser.add_argument("--query-encoder-type", default="transformer", choices=("mean", "transformer"))
     parser.add_argument("--query-layers", type=int, default=2)
     parser.add_argument("--category-vocab-size", type=int, default=32)
@@ -72,7 +74,7 @@ def resolve_device(device_arg: str) -> torch.device:
 
 
 def collate(batch):
-    return {
+    output = {
         "sample_id": [item["sample_id"] for item in batch],
         "sam_tokens": torch.stack([item["sam_tokens"] for item in batch]),
         "dino_tokens": torch.stack([item["dino_tokens"] for item in batch]),
@@ -83,6 +85,18 @@ def collate(batch):
         "scale_label": torch.stack([item["scale_label"] for item in batch]),
         "bbox": torch.stack([item["bbox"] for item in batch]),
     }
+    if "lm_query_hidden" in batch[0]:
+        max_len = max(item["lm_query_hidden"].shape[0] for item in batch)
+        hidden_dim = batch[0]["lm_query_hidden"].shape[-1]
+        hidden = batch[0]["lm_query_hidden"].new_zeros(len(batch), max_len, hidden_dim)
+        mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+        for row_idx, item in enumerate(batch):
+            token_count = item["lm_query_hidden"].shape[0]
+            hidden[row_idx, :token_count] = item["lm_query_hidden"]
+            mask[row_idx, :token_count] = item["lm_query_mask"]
+        output["lm_query_hidden"] = hidden
+        output["lm_query_mask"] = mask
+    return output
 
 
 def box_iou_xyxy(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
@@ -199,6 +213,11 @@ def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.devi
         sam_tokens = batch["sam_tokens"].to(device)
         dino_tokens = batch["dino_tokens"].to(device)
         query_tokens = batch["query_tokens"].to(device)
+        lm_query_hidden = batch.get("lm_query_hidden")
+        lm_query_mask = batch.get("lm_query_mask")
+        if lm_query_hidden is not None:
+            lm_query_hidden = lm_query_hidden.to(device)
+            lm_query_mask = lm_query_mask.to(device)
         category_id = batch["category_id"].to(device)
         region_id = batch["region_id"].to(device)
         query_rule_id = batch["query_rule_id"].to(device)
@@ -208,6 +227,8 @@ def evaluate(model: UAVPerceptionAdapter, loader: DataLoader, device: torch.devi
             sam_tokens,
             dino_tokens,
             query_tokens=query_tokens,
+            lm_query_hidden=lm_query_hidden,
+            lm_query_mask=lm_query_mask,
             category_ids=category_id,
             scale_labels=scale_label,
             region_ids=region_id,
@@ -249,9 +270,11 @@ def main() -> None:
     train_dataset = TokenGroundingDataset(
         args.train_index,
         args.token_dir,
+        lm_query_dir=args.lm_query_dir,
         bbox_key=args.bbox_key,
         query_max_len=args.query_max_len,
         query_vocab_size=args.query_vocab_size,
+        max_lm_query_tokens=args.max_lm_query_tokens,
         region_vocab_size=args.region_vocab_size,
         rule_vocab_size=args.rule_vocab_size,
     )
@@ -267,9 +290,11 @@ def main() -> None:
         val_dataset = TokenGroundingDataset(
             args.val_index,
             args.token_dir,
+            lm_query_dir=args.lm_query_dir,
             bbox_key=args.bbox_key,
             query_max_len=args.query_max_len,
             query_vocab_size=args.query_vocab_size,
+            max_lm_query_tokens=args.max_lm_query_tokens,
             region_vocab_size=args.region_vocab_size,
             rule_vocab_size=args.rule_vocab_size,
         )
@@ -293,6 +318,8 @@ def main() -> None:
         query_encoder_type=args.query_encoder_type,
         query_layers=args.query_layers,
         max_query_tokens=args.query_max_len,
+        lm_query_dim=first_batch["lm_query_hidden"].shape[-1] if "lm_query_hidden" in first_batch else 0,
+        max_lm_query_tokens=args.max_lm_query_tokens,
         category_vocab_size=args.category_vocab_size,
         region_vocab_size=args.region_vocab_size,
         rule_vocab_size=args.rule_vocab_size,
@@ -325,6 +352,11 @@ def main() -> None:
             sam_tokens = batch["sam_tokens"].to(device)
             dino_tokens = batch["dino_tokens"].to(device)
             query_tokens = batch["query_tokens"].to(device)
+            lm_query_hidden = batch.get("lm_query_hidden")
+            lm_query_mask = batch.get("lm_query_mask")
+            if lm_query_hidden is not None:
+                lm_query_hidden = lm_query_hidden.to(device)
+                lm_query_mask = lm_query_mask.to(device)
             category_id = batch["category_id"].to(device)
             region_id = batch["region_id"].to(device)
             query_rule_id = batch["query_rule_id"].to(device)
@@ -334,6 +366,8 @@ def main() -> None:
                 sam_tokens,
                 dino_tokens,
                 query_tokens=query_tokens,
+                lm_query_hidden=lm_query_hidden,
+                lm_query_mask=lm_query_mask,
                 category_ids=category_id,
                 scale_labels=scale_label,
                 region_ids=region_id,
@@ -414,6 +448,8 @@ def main() -> None:
             "num_heads": args.num_heads,
             "query_vocab_size": args.query_vocab_size,
             "query_max_len": args.query_max_len,
+            "lm_query_dim": first_batch["lm_query_hidden"].shape[-1] if "lm_query_hidden" in first_batch else 0,
+            "max_lm_query_tokens": args.max_lm_query_tokens,
             "query_encoder_type": args.query_encoder_type,
             "query_layers": args.query_layers,
             "category_vocab_size": args.category_vocab_size,
