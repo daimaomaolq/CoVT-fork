@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--center-size-loss-weight", type=float, default=0.5)
     parser.add_argument("--score-loss-weight", type=float, default=0.2)
     parser.add_argument("--giou-loss-weight", type=float, default=1.0)
+    parser.add_argument("--size-normalized-loss-weight", type=float, default=0.0)
+    parser.add_argument("--log-size-loss-weight", type=float, default=0.0)
     parser.add_argument("--delta-loss-weight", type=float, default=0.005)
     parser.add_argument(
         "--bbox-logit-loss-weight",
@@ -132,6 +134,22 @@ def box_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
     center = (boxes[..., :2] + boxes[..., 2:]) * 0.5
     size = (boxes[..., 2:] - boxes[..., :2]).clamp(min=0)
     return torch.cat([center, size], dim=-1)
+
+
+def box_wh(boxes: torch.Tensor) -> torch.Tensor:
+    return (boxes[..., 2:] - boxes[..., :2]).clamp(min=1e-4)
+
+
+def size_normalized_bbox_loss(pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
+    target_wh = box_wh(target_boxes)
+    normalizer = torch.cat([target_wh, target_wh], dim=-1).clamp(min=1e-3)
+    return F.smooth_l1_loss((pred_boxes - target_boxes) / normalizer, torch.zeros_like(pred_boxes))
+
+
+def log_size_loss(pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
+    pred_log_wh = torch.log(box_wh(pred_boxes))
+    target_log_wh = torch.log(box_wh(target_boxes))
+    return F.smooth_l1_loss(pred_log_wh, target_log_wh)
 
 
 def candidate_l1_distance(candidate_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
@@ -261,6 +279,8 @@ def main() -> None:
         component_sums = {
             "bbox_loss": 0.0,
             "giou_loss": 0.0,
+            "size_normalized_loss": 0.0,
+            "log_size_loss": 0.0,
             "aux_bbox_loss": 0.0,
             "center_size_loss": 0.0,
             "score_loss": 0.0,
@@ -285,6 +305,8 @@ def main() -> None:
             matched_bbox = candidates[batch_indices, best_idx]
             bbox_loss = F.smooth_l1_loss(matched_bbox, bbox)
             giou_loss = 1.0 - generalized_box_iou_xyxy(matched_bbox, bbox).mean()
+            size_normalized_loss = size_normalized_bbox_loss(matched_bbox, bbox)
+            matched_log_size_loss = log_size_loss(matched_bbox, bbox)
             aux_bbox_loss = weighted_aux_bbox_loss(candidates, bbox, anchor_dist)
             center_size_loss = F.smooth_l1_loss(box_cxcywh(matched_bbox), box_cxcywh(bbox))
             rank_loss = F.cross_entropy(pred["candidate_scores"], best_idx)
@@ -298,6 +320,8 @@ def main() -> None:
             loss = (
                 bbox_loss
                 + args.giou_loss_weight * giou_loss
+                + args.size_normalized_loss_weight * size_normalized_loss
+                + args.log_size_loss_weight * matched_log_size_loss
                 + args.aux_bbox_loss_weight * aux_bbox_loss
                 + args.center_size_loss_weight * center_size_loss
                 + args.score_loss_weight * score_loss
@@ -316,6 +340,8 @@ def main() -> None:
             component_values = {
                 "bbox_loss": bbox_loss,
                 "giou_loss": giou_loss,
+                "size_normalized_loss": size_normalized_loss,
+                "log_size_loss": matched_log_size_loss,
                 "aux_bbox_loss": aux_bbox_loss,
                 "center_size_loss": center_size_loss,
                 "score_loss": score_loss,
