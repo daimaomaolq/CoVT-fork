@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-INDEX_VERSION = "refpg_v1"
+INDEX_VERSION = "refpg_v2"
 
 VISDRONE_CATEGORIES = {
     0: "ignored region",
@@ -78,6 +78,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-per-image", type=int, default=None)
     parser.add_argument("--max-per-category", type=int, default=None)
     parser.add_argument("--source", default="VisDrone-RefPG")
+    parser.add_argument(
+        "--query-style",
+        default="natural",
+        choices=("natural", "structured"),
+        help="natural writes readable referring phrases; structured writes compact slot tokens for lightweight adapters.",
+    )
     parser.add_argument(
         "--prefer-vehicles",
         action="store_true",
@@ -223,7 +229,24 @@ def is_vehicle(category: str) -> bool:
     return category in {"car", "van", "truck", "bus", "motor", "bicycle", "tricycle", "awning tricycle"}
 
 
-def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list[QueryCandidate]:
+def query_text(
+    style: str,
+    natural: str,
+    target: ObjectRecord,
+    relation: str,
+) -> str:
+    if style == "natural":
+        return natural
+    slots = [
+        f"category_{target.category.replace(' ', '_')}",
+        f"region_{target.region.replace(' ', '_')}",
+        f"scale_{target.scale}",
+        relation,
+    ]
+    return " ".join(slots)
+
+
+def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord], query_style: str) -> list[QueryCandidate]:
     same_category = [obj for obj in objects if obj.category_id == target.category_id]
     same_region_category = [
         obj for obj in same_category if obj.region == target.region
@@ -239,14 +262,24 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
 
     queries: list[QueryCandidate] = [
         QueryCandidate(
-            text=f"find the {scale_category} in the {region} region",
+            text=query_text(
+                query_style,
+                f"find the {scale_category} in the {region} region",
+                target,
+                "relation_region_scale",
+            ),
             rule="category+scale+region",
             matcher=lambda obj, t=target: (
                 obj.category_id == t.category_id and obj.scale == t.scale and obj.region == t.region
             ),
         ),
         QueryCandidate(
-            text=f"find the {category} closest to the {edge_name}",
+            text=query_text(
+                query_style,
+                f"find the {category} closest to the {edge_name}",
+                target,
+                f"closest_{edge_name.replace(' ', '_')}",
+            ),
             rule=f"category+closest_{edge_name.replace(' ', '_')}",
             matcher=lambda obj, t=target, edge=edge_name: obj.category_id == t.category_id
             and obj.box_idx == closest_by_edge(
@@ -266,7 +299,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
         queries.extend(
             [
                 QueryCandidate(
-                    text=f"find the {ordinal(left_rank)} {category} from the left in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(left_rank)} {category} from the left in the {region} region",
+                        target,
+                        f"left_rank_{left_rank}",
+                    ),
                     rule="category+region+left_ordinal",
                     matcher=lambda obj, t=target, rank=left_rank: obj.category_id == t.category_id
                     and obj.region == t.region
@@ -278,7 +316,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
                     == rank,
                 ),
                 QueryCandidate(
-                    text=f"find the {ordinal(right_rank)} {category} from the right in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(right_rank)} {category} from the right in the {region} region",
+                        target,
+                        f"right_rank_{right_rank}",
+                    ),
                     rule="category+region+right_ordinal",
                     matcher=lambda obj, t=target, rank=right_rank: obj.category_id == t.category_id
                     and obj.region == t.region
@@ -290,7 +333,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
                     == rank,
                 ),
                 QueryCandidate(
-                    text=f"find the {ordinal(top_rank)} {category} from the top in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(top_rank)} {category} from the top in the {region} region",
+                        target,
+                        f"top_rank_{top_rank}",
+                    ),
                     rule="category+region+top_ordinal",
                     matcher=lambda obj, t=target, rank=top_rank: obj.category_id == t.category_id
                     and obj.region == t.region
@@ -302,7 +350,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
                     == rank,
                 ),
                 QueryCandidate(
-                    text=f"find the {ordinal(bottom_rank)} {category} from the bottom in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(bottom_rank)} {category} from the bottom in the {region} region",
+                        target,
+                        f"bottom_rank_{bottom_rank}",
+                    ),
                     rule="category+region+bottom_ordinal",
                     matcher=lambda obj, t=target, rank=bottom_rank: obj.category_id == t.category_id
                     and obj.region == t.region
@@ -314,7 +367,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
                     == rank,
                 ),
                 QueryCandidate(
-                    text=f"find the {ordinal(area_rank)} largest {category} in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(area_rank)} largest {category} in the {region} region",
+                        target,
+                        f"area_rank_{area_rank}",
+                    ),
                     rule="category+region+area_ordinal",
                     matcher=lambda obj, t=target, rank=area_rank: obj.category_id == t.category_id
                     and obj.region == t.region
@@ -334,7 +392,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
         queries.extend(
             [
                 QueryCandidate(
-                    text=f"find the {ordinal(left_rank)} {scale_category} from the left in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(left_rank)} {scale_category} from the left in the {region} region",
+                        target,
+                        f"left_rank_{left_rank}",
+                    ),
                     rule="category+scale+region+left_ordinal",
                     matcher=lambda obj, t=target, rank=left_rank: obj.category_id == t.category_id
                     and obj.scale == t.scale
@@ -353,7 +416,12 @@ def candidate_queries(target: ObjectRecord, objects: list[ObjectRecord]) -> list
                     == rank,
                 ),
                 QueryCandidate(
-                    text=f"find the {ordinal(bottom_rank)} {scale_category} from the bottom in the {region} region",
+                    text=query_text(
+                        query_style,
+                        f"find the {ordinal(bottom_rank)} {scale_category} from the bottom in the {region} region",
+                        target,
+                        f"bottom_rank_{bottom_rank}",
+                    ),
                     rule="category+scale+region+bottom_ordinal",
                     matcher=lambda obj, t=target, rank=bottom_rank: obj.category_id == t.category_id
                     and obj.scale == t.scale
@@ -389,8 +457,12 @@ def closest_by_edge(objects: list[ObjectRecord], edge_name: str) -> ObjectRecord
     raise ValueError(edge_name)
 
 
-def choose_unique_query(target: ObjectRecord, objects: list[ObjectRecord]) -> tuple[QueryCandidate, list[ObjectRecord]] | None:
-    for query in candidate_queries(target, objects):
+def choose_unique_query(
+    target: ObjectRecord,
+    objects: list[ObjectRecord],
+    query_style: str,
+) -> tuple[QueryCandidate, list[ObjectRecord]] | None:
+    for query in candidate_queries(target, objects, query_style):
         matches = [obj for obj in objects if query.matcher(obj)]
         if len(matches) == 1 and matches[0].box_idx == target.box_idx:
             return query, matches
@@ -455,12 +527,15 @@ def main() -> None:
                     skipped_limits += 1
                     continue
 
-                chosen = choose_unique_query(obj, objects)
+                chosen = choose_unique_query(obj, objects, args.query_style)
                 if chosen is None:
                     skipped_ambiguous += 1
                     continue
                 query, matches = chosen
-                sample_id = f"visdrone_refpg_{annotation_path.stem}_{obj.box_idx:05d}_{query.rule}_{INDEX_VERSION}"
+                sample_id = (
+                    f"visdrone_refpg_{args.query_style}_{annotation_path.stem}_"
+                    f"{obj.box_idx:05d}_{query.rule}_{INDEX_VERSION}"
+                )
                 row = {
                     "sample_id": sample_id,
                     "image": str(image_path),
@@ -475,6 +550,7 @@ def main() -> None:
                     "annotation": str(annotation_path),
                     "object_score": obj.score,
                     "query_version": INDEX_VERSION,
+                    "query_style": args.query_style,
                     "query_type": "referring",
                     "query_rule": query.rule,
                     "matched_candidates": len(matches),
