@@ -27,6 +27,9 @@ def patch_transformers_generation_for_extraction() -> None:
     and the local CoVT model class definitions.
     """
 
+    if os.environ.get("UAV_USE_REAL_TRANSFORMERS_GENERATION") == "1":
+        return
+
     generation_module = sys.modules.get("transformers.generation")
     if getattr(generation_module, "__uav_forward_only_stub__", False):
         return

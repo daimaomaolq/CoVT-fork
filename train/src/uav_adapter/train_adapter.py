@@ -331,7 +331,45 @@ def main() -> None:
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+    checkpoint_config = {
+        "hidden_dim": args.hidden_dim,
+        "dropout": args.dropout,
+        "sam_dim": first_batch["sam_tokens"].shape[-1],
+        "dino_dim": first_batch["dino_tokens"].shape[-1],
+        "num_region_queries": args.num_region_queries,
+        "num_heads": args.num_heads,
+        "query_vocab_size": args.query_vocab_size,
+        "query_max_len": args.query_max_len,
+        "lm_query_dim": first_batch["lm_query_hidden"].shape[-1] if "lm_query_hidden" in first_batch else 0,
+        "max_lm_query_tokens": args.max_lm_query_tokens,
+        "query_encoder_type": args.query_encoder_type,
+        "query_layers": args.query_layers,
+        "category_vocab_size": args.category_vocab_size,
+        "region_vocab_size": args.region_vocab_size,
+        "rule_vocab_size": args.rule_vocab_size,
+        "use_query_metadata": not args.disable_query_metadata,
+        "use_output_query_proj": True,
+        "max_sam_tokens": args.max_sam_tokens,
+        "max_dino_tokens": args.max_dino_tokens,
+        "anchor_delta_scale": args.anchor_delta_scale,
+    }
+
+    def make_checkpoint() -> dict:
+        return {
+            "model": model.state_dict(),
+            "config": checkpoint_config,
+            "history": history,
+            "args": vars(args),
+        }
+
     history = []
+    best_values = {
+        "val_miou": float("-inf"),
+        "val_acc50": float("-inf"),
+        "val_recall3": float("-inf"),
+        "val_oracle_miou": float("-inf"),
+        "val_oracle_acc50": float("-inf"),
+    }
     for epoch in range(1, args.epochs + 1):
         model.train()
         total = 0
@@ -436,36 +474,28 @@ def main() -> None:
             row.update({f"val_{key}": value for key, value in evaluate(model, val_loader, device).items()})
         history.append(row)
         print(json.dumps(row, indent=2))
+        for metric, best_value in list(best_values.items()):
+            value = row.get(metric)
+            if value is None or value <= best_value:
+                continue
+            best_values[metric] = value
+            best_path = output_dir / f"best_{metric}.pt"
+            torch.save(make_checkpoint(), best_path)
+            print(
+                json.dumps(
+                    {
+                        "status": "best",
+                        "metric": metric,
+                        "value": value,
+                        "epoch": epoch,
+                        "checkpoint": str(best_path),
+                    },
+                    indent=2,
+                )
+            )
 
-    checkpoint = {
-        "model": model.state_dict(),
-        "config": {
-            "hidden_dim": args.hidden_dim,
-            "dropout": args.dropout,
-            "sam_dim": first_batch["sam_tokens"].shape[-1],
-            "dino_dim": first_batch["dino_tokens"].shape[-1],
-            "num_region_queries": args.num_region_queries,
-            "num_heads": args.num_heads,
-            "query_vocab_size": args.query_vocab_size,
-            "query_max_len": args.query_max_len,
-            "lm_query_dim": first_batch["lm_query_hidden"].shape[-1] if "lm_query_hidden" in first_batch else 0,
-            "max_lm_query_tokens": args.max_lm_query_tokens,
-            "query_encoder_type": args.query_encoder_type,
-            "query_layers": args.query_layers,
-            "category_vocab_size": args.category_vocab_size,
-            "region_vocab_size": args.region_vocab_size,
-            "rule_vocab_size": args.rule_vocab_size,
-            "use_query_metadata": not args.disable_query_metadata,
-            "use_output_query_proj": True,
-            "max_sam_tokens": args.max_sam_tokens,
-            "max_dino_tokens": args.max_dino_tokens,
-            "anchor_delta_scale": args.anchor_delta_scale,
-        },
-        "history": history,
-        "args": vars(args),
-    }
     ckpt_path = output_dir / "uav_adapter.pt"
-    torch.save(checkpoint, ckpt_path)
+    torch.save(make_checkpoint(), ckpt_path)
     print(json.dumps({"status": "ok", "checkpoint": str(ckpt_path)}, indent=2))
 
 
