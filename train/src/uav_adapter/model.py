@@ -427,6 +427,7 @@ class UAVPerceptionAdapter(nn.Module):
         return {
             "bbox": best_bbox,
             "score": best_score,
+            "shared_feature": region_features.mean(dim=1),
             "anchor_boxes": self.anchor_boxes.to(device=device, dtype=candidate_bboxes.dtype),
             "candidate_bbox_deltas": candidate_bbox_deltas,
             "candidate_bboxes": candidate_bboxes,
