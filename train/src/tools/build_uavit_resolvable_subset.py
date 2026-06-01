@@ -194,28 +194,45 @@ def build_schema(row: dict[str, Any], row_idx: int, resolved_image: str) -> dict
     if tag in {"vg"}:
         if not answer_boxes:
             return None
-        base.update({"task": "grounding", "query": parse_phrase(human), "bbox": norm_box(answer_boxes[0])})
+        bbox = norm_box(answer_boxes[0])
+        base.update(
+            {
+                "task": "grounding",
+                "task_type": "grounding",
+                "query": parse_phrase(human),
+                "bbox": bbox,
+                "bbox_norm": bbox,
+            }
+        )
         return base
     if tag == "det":
         if not answer_boxes:
             return None
+        bboxes = [norm_box(box) for box in answer_boxes]
         base.update(
             {
                 "task": "grounding",
+                "task_type": "detection",
                 "query": parse_phrase(human),
-                "bbox": norm_box(answer_boxes[0]),
-                "bboxes": [norm_box(box) for box in answer_boxes],
+                "bbox": bboxes[0],
+                "bbox_norm": bboxes[0],
+                "bboxes": bboxes,
+                "bboxes_norm": bboxes,
+                "bbox_count": len(bboxes),
             }
         )
         return base
     if tag in {"reg_vqa", "reg_cls"}:
         if not human_boxes:
             return None
+        bbox = norm_box(human_boxes[0])
         base.update(
             {
                 "task": "grounding",
+                "task_type": "region_answer",
                 "query": parse_phrase(human),
-                "bbox": norm_box(human_boxes[0]),
+                "bbox": bbox,
+                "bbox_norm": bbox,
                 "answer": clean_text(answer),
             }
         )
@@ -224,6 +241,7 @@ def build_schema(row: dict[str, Any], row_idx: int, resolved_image: str) -> dict
         base.update(
             {
                 "task": "understanding",
+                "task_type": "image_answer",
                 "query": parse_phrase(human),
                 "answer": clean_text(answer),
             }
@@ -231,15 +249,21 @@ def build_schema(row: dict[str, Any], row_idx: int, resolved_image: str) -> dict
         options = parse_options(human)
         if options:
             base["choices"] = options
+            base["options"] = options
         return base
     if tag in {"img_cap", "deta_cap", "reg_cap"}:
         if tag == "reg_cap" and human_boxes:
-            base["region"] = norm_box(human_boxes[0])
+            bbox = norm_box(human_boxes[0])
+            base["region"] = bbox
+            base["region_norm"] = bbox
+            base["bbox_norm"] = bbox
         base.update(
             {
                 "task": "understanding",
+                "task_type": "region_caption" if tag == "reg_cap" else "caption",
                 "query": parse_phrase(human),
                 "answer": clean_text(answer),
+                "caption": clean_text(answer),
             }
         )
         return base
