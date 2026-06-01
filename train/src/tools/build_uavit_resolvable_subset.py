@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-size", type=int, default=50000)
     parser.add_argument("--val-size", type=int, default=5000)
     parser.add_argument("--visdrone-grounding-max-frac", type=float, default=0.2)
+    parser.add_argument(
+        "--min-suffix-parts",
+        type=int,
+        default=2,
+        help="Minimum matching path suffix parts for resolving an image. 2 means parent directory + filename.",
+    )
     parser.add_argument("--seed", type=int, default=20260601)
     parser.add_argument("--write-examples", type=int, default=20)
     return parser.parse_args()
@@ -139,7 +145,7 @@ def common_suffix_score(candidate: Path, image_rel: str) -> int:
     return score
 
 
-def resolve_image(image_rel: str, by_basename: dict[str, list[Path]]) -> str | None:
+def resolve_image(image_rel: str, by_basename: dict[str, list[Path]], min_suffix_parts: int) -> str | None:
     rel = normalize_rel(image_rel)
     if not rel:
         return None
@@ -151,7 +157,7 @@ def resolve_image(image_rel: str, by_basename: dict[str, list[Path]]) -> str | N
         return None
     scored = [(common_suffix_score(path, rel), path) for path in candidates]
     scored.sort(key=lambda item: (item[0], -len(str(item[1]))), reverse=True)
-    if scored[0][0] <= 0:
+    if scored[0][0] < min_suffix_parts:
         return None
     return str(scored[0][1])
 
@@ -257,10 +263,11 @@ def build_schema(row: dict[str, Any], row_idx: int, resolved_image: str) -> dict
             base["region"] = bbox
             base["region_norm"] = bbox
             base["bbox_norm"] = bbox
+        task_type = "region_caption" if tag == "reg_cap" and human_boxes else "caption"
         base.update(
             {
                 "task": "understanding",
-                "task_type": "region_caption" if tag == "reg_cap" else "caption",
+                "task_type": task_type,
                 "query": parse_phrase(human),
                 "answer": clean_text(answer),
                 "caption": clean_text(answer),
@@ -325,7 +332,7 @@ def main() -> None:
         source_stats[prefix]["total_rows"] += 1
         source_stats[prefix][f"tag_{tag}"] += 1
         source_stats[prefix][f"task_{task_family}"] += 1
-        resolved_image = resolve_image(image_rel, by_basename)
+        resolved_image = resolve_image(image_rel, by_basename, args.min_suffix_parts)
         if not resolved_image:
             continue
         source_stats[prefix]["resolved_rows"] += 1
