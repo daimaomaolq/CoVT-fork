@@ -44,6 +44,63 @@ def answer_id(text: str, vocab_size: int) -> torch.Tensor:
     return field_id(str(text).strip().lower(), vocab_size)
 
 
+def normalize_answer_text(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(text).lower())
+    text = re.sub(r"^[a-z][\.\):]\s+", "", text.strip())
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text)
+    return " ".join(text.split())
+
+
+def option_label_and_text(option: Any, index: int) -> tuple[str, str]:
+    if isinstance(option, dict):
+        label = str(option.get("label") or option.get("key") or chr(ord("A") + index))
+        text = str(option.get("text") or option.get("value") or option.get("answer") or "")
+        return label.strip().upper(), text.strip()
+    raw = str(option).strip()
+    match = re.match(r"^([A-Za-z])[\.\):]\s*(.+)$", raw)
+    if match:
+        return match.group(1).upper(), match.group(2).strip()
+    return chr(ord("A") + index), raw
+
+
+def coerce_options(raw_options: Any) -> list[tuple[str, str]]:
+    if raw_options is None:
+        return []
+    if isinstance(raw_options, dict):
+        return [(str(key).strip().upper(), str(value).strip()) for key, value in raw_options.items()]
+    if not isinstance(raw_options, list):
+        return []
+    return [option_label_and_text(option, idx) for idx, option in enumerate(raw_options)]
+
+
+def resolve_choice_label(options: list[tuple[str, str]], answer: str, row: dict[str, Any]) -> int:
+    for key in ("answer_index", "choice_index", "label_index"):
+        if key in row:
+            try:
+                index = int(row[key])
+                if 0 <= index < len(options):
+                    return index
+            except (TypeError, ValueError):
+                pass
+    answer_label = str(row.get("answer_label") or row.get("label") or "").strip().upper()
+    answer_text = str(answer).strip()
+    if not answer_label and re.fullmatch(r"[A-Za-z]", answer_text):
+        answer_label = answer_text.upper()
+    if answer_label:
+        for idx, (label, _text) in enumerate(options):
+            if label == answer_label:
+                return idx
+    answer_norm = normalize_answer_text(answer_text)
+    for idx, (_label, text) in enumerate(options):
+        if normalize_answer_text(text) == answer_norm:
+            return idx
+    for idx, (_label, text) in enumerate(options):
+        option_norm = normalize_answer_text(text)
+        if answer_norm and option_norm and (answer_norm in option_norm or option_norm in answer_norm):
+            return idx
+    return -1
+
+
 def scale_label(bbox: list[float]) -> int:
     width = max(float(bbox[2]) - float(bbox[0]), 0.0)
     height = max(float(bbox[3]) - float(bbox[1]), 0.0)
@@ -79,6 +136,7 @@ class UAVITMultiTaskTokenDataset(Dataset):
         query_vocab_size: int = 8192,
         answer_vocab_size: int = 4096,
         caption_embedding_dim: int = 256,
+        max_choices: int = 8,
         max_lm_query_tokens: int = 64,
         region_vocab_size: int = 64,
         rule_vocab_size: int = 256,
@@ -90,6 +148,7 @@ class UAVITMultiTaskTokenDataset(Dataset):
         self.query_vocab_size = query_vocab_size
         self.answer_vocab_size = answer_vocab_size
         self.caption_embedding_dim = caption_embedding_dim
+        self.max_choices = max_choices
         self.max_lm_query_tokens = max_lm_query_tokens
         self.region_vocab_size = region_vocab_size
         self.rule_vocab_size = rule_vocab_size
@@ -134,6 +193,13 @@ class UAVITMultiTaskTokenDataset(Dataset):
         bbox = [float(value) for value in bbox]
         answer = row.get("answer") or ""
         caption = row.get("caption") or answer
+        choice_tokens = torch.zeros(self.max_choices, self.query_max_len, dtype=torch.long)
+        choice_mask = torch.zeros(self.max_choices, dtype=torch.bool)
+        options = coerce_options(row.get("options") or row.get("choices"))
+        choice_label = resolve_choice_label(options[: self.max_choices], str(answer), row)
+        for choice_idx, (_label, choice_text) in enumerate(options[: self.max_choices]):
+            choice_tokens[choice_idx] = word_ids(choice_text, self.query_max_len, self.query_vocab_size)
+            choice_mask[choice_idx] = True
         item = {
             "sample_id": row["sample_id"],
             "token_sample_id": token_sample_id,
@@ -148,6 +214,9 @@ class UAVITMultiTaskTokenDataset(Dataset):
             "bbox": torch.tensor(bbox, dtype=torch.float32),
             "scale_label": torch.tensor(scale_label(bbox), dtype=torch.long),
             "answer_id": answer_id(str(answer), self.answer_vocab_size),
+            "choice_tokens": choice_tokens,
+            "choice_mask": choice_mask,
+            "choice_label": torch.tensor(choice_label, dtype=torch.long),
             "caption_target": text_embedding(str(caption), self.caption_embedding_dim),
             "has_grounding": torch.tensor(task_type in GROUNDING_TYPES, dtype=torch.bool),
             "has_answer": torch.tensor(task_type in ANSWER_TYPES, dtype=torch.bool),
@@ -185,6 +254,9 @@ def multitask_collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "bbox": torch.stack([item["bbox"] for item in batch]),
         "scale_label": torch.stack([item["scale_label"] for item in batch]),
         "answer_id": torch.stack([item["answer_id"] for item in batch]),
+        "choice_tokens": torch.stack([item["choice_tokens"] for item in batch]),
+        "choice_mask": torch.stack([item["choice_mask"] for item in batch]),
+        "choice_label": torch.stack([item["choice_label"] for item in batch]),
         "caption_target": torch.stack([item["caption_target"] for item in batch]),
         "has_grounding": torch.stack([item["has_grounding"] for item in batch]),
         "has_answer": torch.stack([item["has_answer"] for item in batch]),

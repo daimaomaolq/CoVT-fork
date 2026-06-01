@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region-vocab-size", type=int, default=64)
     parser.add_argument("--rule-vocab-size", type=int, default=256)
     parser.add_argument("--answer-vocab-size", type=int, default=4096)
+    parser.add_argument("--max-choices", type=int, default=8)
     parser.add_argument("--caption-embedding-dim", type=int, default=256)
     parser.add_argument("--caption-temperature", type=float, default=0.07)
     parser.add_argument("--disable-query-metadata", action="store_true")
@@ -83,6 +84,7 @@ def make_loader(args: argparse.Namespace, indexes: list[str] | None, shuffle: bo
         query_max_len=args.query_max_len,
         query_vocab_size=args.query_vocab_size,
         answer_vocab_size=args.answer_vocab_size,
+        max_choices=args.max_choices,
         caption_embedding_dim=args.caption_embedding_dim,
         max_lm_query_tokens=args.max_lm_query_tokens,
         region_vocab_size=args.region_vocab_size,
@@ -157,6 +159,9 @@ def subset_batch(batch: dict[str, torch.Tensor], mask: torch.Tensor) -> dict[str
         "bbox",
         "scale_label",
         "answer_id",
+        "choice_tokens",
+        "choice_mask",
+        "choice_label",
         "caption_target",
     ]
     out = {key: batch[key][mask] for key in keys}
@@ -177,6 +182,8 @@ def forward_task(model: UAVMultiTaskAdapter, batch: dict[str, torch.Tensor], tas
         scale_labels=batch["scale_label"],
         region_ids=batch["region_id"],
         rule_ids=batch["query_rule_id"],
+        choice_tokens=batch.get("choice_tokens"),
+        choice_mask=batch.get("choice_mask"),
         task=task,
     )
 
@@ -192,8 +199,15 @@ def move_batch(batch: dict, device: torch.device) -> dict:
 @torch.no_grad()
 def evaluate(model: UAVMultiTaskAdapter, loader: DataLoader, device: torch.device, args) -> dict[str, float]:
     model.eval()
-    totals = {"grounding": 0, "answer": 0, "caption": 0}
-    sums = {"ground_iou": 0.0, "ground_acc50": 0.0, "answer_acc": 0.0, "caption_cos": 0.0}
+    totals = {"grounding": 0, "answer": 0, "choice": 0, "hash_answer": 0, "caption": 0}
+    sums = {
+        "ground_iou": 0.0,
+        "ground_acc50": 0.0,
+        "answer_acc": 0.0,
+        "choice_acc": 0.0,
+        "hash_answer_acc": 0.0,
+        "caption_cos": 0.0,
+    }
     for raw_batch in loader:
         batch = move_batch(raw_batch, device)
         ground_mask = batch["has_grounding"].bool()
@@ -210,9 +224,23 @@ def evaluate(model: UAVMultiTaskAdapter, loader: DataLoader, device: torch.devic
         if bool(answer_mask.any()):
             sub = subset_batch(batch, answer_mask)
             pred = forward_task(model, sub, task="answer")
-            answer_pred = pred["answer_logits"].argmax(dim=1)
-            totals["answer"] += answer_pred.shape[0]
-            sums["answer_acc"] += float((answer_pred == sub["answer_id"]).sum().cpu())
+            choice_rows = sub["choice_label"] >= 0
+            hash_rows = ~choice_rows
+            totals["answer"] += sub["answer_id"].shape[0]
+            if bool(choice_rows.any()) and "choice_logits" in pred:
+                choice_pred = pred["choice_logits"][choice_rows].argmax(dim=1)
+                choice_target = sub["choice_label"][choice_rows]
+                correct = float((choice_pred == choice_target).sum().cpu())
+                totals["choice"] += choice_target.shape[0]
+                sums["choice_acc"] += correct
+                sums["answer_acc"] += correct
+            if bool(hash_rows.any()):
+                answer_pred = pred["answer_logits"][hash_rows].argmax(dim=1)
+                answer_target = sub["answer_id"][hash_rows]
+                correct = float((answer_pred == answer_target).sum().cpu())
+                totals["hash_answer"] += answer_target.shape[0]
+                sums["hash_answer_acc"] += correct
+                sums["answer_acc"] += correct
         if bool(caption_mask.any()):
             sub = subset_batch(batch, caption_mask)
             pred = forward_task(model, sub, task="caption")
@@ -223,10 +251,14 @@ def evaluate(model: UAVMultiTaskAdapter, loader: DataLoader, device: torch.devic
     return {
         "ground_miou": sums["ground_iou"] / max(totals["grounding"], 1),
         "ground_acc50": sums["ground_acc50"] / max(totals["grounding"], 1),
-        "answer_acc_hash": sums["answer_acc"] / max(totals["answer"], 1),
+        "answer_acc": sums["answer_acc"] / max(totals["answer"], 1),
+        "answer_acc_choice": sums["choice_acc"] / max(totals["choice"], 1),
+        "answer_acc_hash": sums["hash_answer_acc"] / max(totals["hash_answer"], 1),
         "caption_cos": sums["caption_cos"] / max(totals["caption"], 1),
         "ground_samples": totals["grounding"],
         "answer_samples": totals["answer"],
+        "choice_samples": totals["choice"],
+        "hash_answer_samples": totals["hash_answer"],
         "caption_samples": totals["caption"],
     }
 
@@ -287,6 +319,7 @@ def main() -> None:
         "max_dino_tokens": args.max_dino_tokens,
         "anchor_delta_scale": args.anchor_delta_scale,
         "answer_vocab_size": args.answer_vocab_size,
+        "max_choices": args.max_choices,
         "caption_embedding_dim": args.caption_embedding_dim,
     }
     history = []
@@ -325,9 +358,19 @@ def main() -> None:
             if bool(answer_mask.any()):
                 sub = subset_batch(batch, answer_mask)
                 pred = forward_task(model, sub, task="answer")
-                item_loss = F.cross_entropy(pred["answer_logits"], sub["answer_id"])
-                loss = loss + args.answer_loss_weight * item_loss
-                component_sums["answer_ce"] = component_sums.get("answer_ce", 0.0) + float(item_loss.detach().cpu()) * sub["answer_id"].shape[0]
+                choice_rows = sub["choice_label"] >= 0
+                hash_rows = ~choice_rows
+                answer_losses = []
+                if bool(choice_rows.any()) and "choice_logits" in pred:
+                    item_loss = F.cross_entropy(pred["choice_logits"][choice_rows], sub["choice_label"][choice_rows])
+                    answer_losses.append(item_loss)
+                    component_sums["answer_choice_ce"] = component_sums.get("answer_choice_ce", 0.0) + float(item_loss.detach().cpu()) * sub["choice_label"][choice_rows].shape[0]
+                if bool(hash_rows.any()):
+                    item_loss = F.cross_entropy(pred["answer_logits"][hash_rows], sub["answer_id"][hash_rows])
+                    answer_losses.append(item_loss)
+                    component_sums["answer_hash_ce"] = component_sums.get("answer_hash_ce", 0.0) + float(item_loss.detach().cpu()) * sub["answer_id"][hash_rows].shape[0]
+                if answer_losses:
+                    loss = loss + args.answer_loss_weight * torch.stack(answer_losses).mean()
             if bool(caption_mask.any()):
                 sub = subset_batch(batch, caption_mask)
                 pred = forward_task(model, sub, task="caption")
@@ -345,7 +388,7 @@ def main() -> None:
         row.update({f"train_{key}": value / max(total_items, 1) for key, value in component_sums.items()})
         if val_loader is not None:
             row.update({f"val_{key}": value for key, value in evaluate(model, val_loader, device, args).items()})
-            score = row.get("val_ground_acc50", 0.0) + row.get("val_answer_acc_hash", 0.0) + row.get("val_caption_cos", 0.0)
+            score = row.get("val_ground_acc50", 0.0) + row.get("val_answer_acc", 0.0) + row.get("val_caption_cos", 0.0)
             if score > best_score:
                 best_score = score
                 save_checkpoint("best_multitask.pt")
