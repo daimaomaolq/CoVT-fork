@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,8 +13,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from uav_adapter.multitask_dataset import UAVITMultiTaskTokenDataset, multitask_collate
 from uav_adapter.multitask_model import UAVMultiTaskAdapter
@@ -74,9 +78,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def make_loader(args: argparse.Namespace, indexes: list[str] | None, shuffle: bool) -> DataLoader | None:
+def make_loader(
+    args: argparse.Namespace,
+    indexes: list[str] | None,
+    shuffle: bool,
+    distributed: bool = False,
+) -> tuple[DataLoader | None, DistributedSampler | None]:
     if not indexes:
-        return None
+        return None, None
     dataset = UAVITMultiTaskTokenDataset(
         indexes,
         args.token_dir,
@@ -90,13 +99,16 @@ def make_loader(args: argparse.Namespace, indexes: list[str] | None, shuffle: bo
         region_vocab_size=args.region_vocab_size,
         rule_vocab_size=args.rule_vocab_size,
     )
-    return DataLoader(
+    sampler = DistributedSampler(dataset, shuffle=shuffle) if distributed else None
+    loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
         num_workers=args.num_workers,
         collate_fn=multitask_collate,
     )
+    return loader, sampler
 
 
 def grounding_loss(pred: dict[str, torch.Tensor], bbox: torch.Tensor, scale_label: torch.Tensor, args) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -196,6 +208,33 @@ def move_batch(batch: dict, device: torch.device) -> dict:
     return moved
 
 
+def setup_distributed(args: argparse.Namespace) -> tuple[bool, int, torch.device]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False, 0, resolve_device(args.device)
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA devices.")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return True, local_rank, torch.device(f"cuda:{local_rank}")
+
+
+def is_rank0() -> bool:
+    return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if isinstance(model, DDP) else model
+
+
+def distributed_sum(value: float, device: torch.device) -> float:
+    tensor = torch.tensor(float(value), device=device)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return float(tensor.cpu())
+
+
 @torch.no_grad()
 def evaluate(model: UAVMultiTaskAdapter, loader: DataLoader, device: torch.device, args) -> dict[str, float]:
     model.eval()
@@ -265,11 +304,16 @@ def evaluate(model: UAVMultiTaskAdapter, loader: DataLoader, device: torch.devic
 
 def main() -> None:
     args = parse_args()
-    device = resolve_device(args.device)
+    distributed, local_rank, device = setup_distributed(args)
     output_dir = Path(args.output_dir).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    train_loader = make_loader(args, args.train_index, shuffle=True)
-    val_loader = make_loader(args, args.val_index, shuffle=False)
+    if is_rank0():
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if distributed:
+        dist.barrier()
+    train_loader, train_sampler = make_loader(args, args.train_index, shuffle=True, distributed=distributed)
+    val_loader, _ = make_loader(args, args.val_index, shuffle=False, distributed=False)
+    if train_loader is None:
+        raise ValueError("At least one --train-index is required.")
     first_batch = next(iter(train_loader))
     model = UAVMultiTaskAdapter(
         sam_dim=first_batch["sam_tokens"].shape[-1],
@@ -295,6 +339,15 @@ def main() -> None:
         answer_vocab_size=args.answer_vocab_size,
         caption_embedding_dim=args.caption_embedding_dim,
     ).to(device)
+    if distributed:
+        if is_rank0():
+            print(json.dumps({"status": "using_ddp", "world_size": dist.get_world_size()}), flush=True)
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     config = {
         "model_type": "UAVMultiTaskAdapter",
@@ -325,9 +378,11 @@ def main() -> None:
     history = []
 
     def save_checkpoint(name: str) -> None:
+        if not is_rank0():
+            return
         torch.save(
             {
-                "model": model.state_dict(),
+                "model": unwrap_model(model).state_dict(),
                 "config": config,
                 "history": history,
                 "args": vars(args),
@@ -337,6 +392,8 @@ def main() -> None:
 
     best_score = float("-inf")
     for epoch in range(1, args.epochs + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         total_loss = 0.0
         total_items = 0
@@ -384,6 +441,13 @@ def main() -> None:
             total_loss += float(loss.detach().cpu()) * batch_items
             total_items += batch_items
 
+        if distributed:
+            total_loss = distributed_sum(total_loss, device)
+            total_items = distributed_sum(total_items, device)
+            component_sums = {
+                key: distributed_sum(value, device)
+                for key, value in component_sums.items()
+            }
         row = {"epoch": epoch, "train_loss": total_loss / max(total_items, 1)}
         row.update({f"train_{key}": value / max(total_items, 1) for key, value in component_sums.items()})
         if val_loader is not None:
@@ -394,10 +458,14 @@ def main() -> None:
                 save_checkpoint("best_multitask.pt")
                 row["best_checkpoint"] = str(output_dir / "best_multitask.pt")
         history.append(row)
-        print(json.dumps(row, ensure_ascii=False, indent=2), flush=True)
+        if is_rank0():
+            print(json.dumps(row, ensure_ascii=False, indent=2), flush=True)
 
     save_checkpoint("uav_multitask_adapter.pt")
-    print(json.dumps({"status": "ok", "checkpoint": str(output_dir / "uav_multitask_adapter.pt")}, indent=2))
+    if is_rank0():
+        print(json.dumps({"status": "ok", "checkpoint": str(output_dir / "uav_multitask_adapter.pt")}, indent=2))
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
