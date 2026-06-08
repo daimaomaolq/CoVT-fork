@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -90,7 +91,40 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Stop each epoch after this many train batches. 0 means full epoch.",
     )
+    parser.add_argument(
+        "--trace-batches",
+        action="store_true",
+        help="Synchronize and print per-rank progress around load/forward/loss/backward/step.",
+    )
     return parser.parse_args()
+
+
+def configure_local_cuda_device() -> None:
+    """Bind each launched process before Accelerate initializes NCCL."""
+
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None or not torch.cuda.is_available():
+        return
+    torch.cuda.set_device(int(local_rank))
+
+
+def trace_rank(accelerator: Accelerator, enabled: bool, message: str) -> None:
+    if not enabled:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(accelerator.device)
+    print(
+        json.dumps(
+            {
+                "trace": message,
+                "rank": accelerator.process_index,
+                "local_rank": accelerator.local_process_index,
+                "device": str(accelerator.device),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
 
 
 def zero_touch_trainable_parameters(model: torch.nn.Module) -> torch.Tensor | None:
@@ -189,8 +223,10 @@ def save_checkpoint(
 
 def main() -> None:
     args = parse_args()
+    configure_local_cuda_device()
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    trace_rank(accelerator, args.trace_batches, "accelerator_ready")
     output_dir = Path(args.output_dir).expanduser().resolve()
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -199,10 +235,14 @@ def main() -> None:
     train_loader, _ = make_loader(args, args.train_index, shuffle=True, distributed=False)
     if train_loader is None:
         raise ValueError("At least one --train-index is required.")
+    trace_rank(accelerator, args.trace_batches, "train_loader_ready")
     first_batch = next(iter(train_loader))
+    trace_rank(accelerator, args.trace_batches, "first_batch_loaded_cpu")
     model, config = build_model(args, first_batch)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    trace_rank(accelerator, args.trace_batches, "model_optimizer_built")
     model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
+    trace_rank(accelerator, args.trace_batches, "accelerator_prepare_done")
 
     val_loader = None
     should_eval = bool(args.val_index) and (
@@ -236,7 +276,9 @@ def main() -> None:
         total_items = 0.0
         component_sums: dict[str, float] = {}
         for batch_index, raw_batch in enumerate(train_loader, start=1):
+            trace_rank(accelerator, args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_raw_loaded")
             batch = move_batch(raw_batch, device)
+            trace_rank(accelerator, args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_batch_on_device")
             loss = torch.zeros((), device=device)
             batch_items = batch["sam_tokens"].shape[0]
             ground_mask = batch["has_grounding"].bool()
@@ -244,6 +286,7 @@ def main() -> None:
             caption_mask = batch["has_caption"].bool()
 
             pred_all = forward_task(model, batch, task="multitask")
+            trace_rank(accelerator, args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_forward_done")
             param_touch = zero_touch_trainable_parameters(accelerator.unwrap_model(model))
             if param_touch is not None:
                 loss = loss + param_touch
@@ -280,9 +323,12 @@ def main() -> None:
                 loss = loss + args.caption_loss_weight * item_loss
                 component_sums["caption_nce"] = component_sums.get("caption_nce", 0.0) + float(item_loss.detach().cpu()) * sub["caption_target"].shape[0]
 
+            trace_rank(accelerator, args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_loss_done")
             optimizer.zero_grad(set_to_none=True)
             accelerator.backward(loss)
+            trace_rank(accelerator, args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_backward_done")
             optimizer.step()
+            trace_rank(accelerator, args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_step_done")
 
             total_loss += float(loss.detach().cpu()) * batch_items
             total_items += float(batch_items)
