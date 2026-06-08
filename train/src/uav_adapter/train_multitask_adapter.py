@@ -183,6 +183,17 @@ def subset_batch(batch: dict[str, torch.Tensor], mask: torch.Tensor) -> dict[str
     return out
 
 
+def subset_output(pred: dict[str, torch.Tensor], mask: torch.Tensor) -> dict[str, torch.Tensor]:
+    batch_size = int(mask.shape[0])
+    out: dict[str, torch.Tensor] = {}
+    for key, value in pred.items():
+        if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == batch_size:
+            out[key] = value[mask]
+        else:
+            out[key] = value
+    return out
+
+
 def forward_task(model: UAVMultiTaskAdapter, batch: dict[str, torch.Tensor], task: str) -> dict[str, torch.Tensor]:
     return model(
         batch["sam_tokens"],
@@ -233,6 +244,25 @@ def distributed_sum(value: float, device: torch.device) -> float:
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return float(tensor.cpu())
+
+
+def maybe_barrier() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
+TRAIN_COMPONENT_KEYS = (
+    "ground_bbox",
+    "ground_giou",
+    "ground_aux_bbox",
+    "ground_rank",
+    "ground_scale",
+    "ground_score",
+    "ground_delta",
+    "answer_choice_ce",
+    "answer_hash_ce",
+    "caption_nce",
+)
 
 
 @torch.no_grad()
@@ -311,7 +341,9 @@ def main() -> None:
     if distributed:
         dist.barrier()
     train_loader, train_sampler = make_loader(args, args.train_index, shuffle=True, distributed=distributed)
-    val_loader, _ = make_loader(args, args.val_index, shuffle=False, distributed=False)
+    val_loader = None
+    if is_rank0():
+        val_loader, _ = make_loader(args, args.val_index, shuffle=False, distributed=False)
     if train_loader is None:
         raise ValueError("At least one --train-index is required.")
     first_batch = next(iter(train_loader))
@@ -405,16 +437,17 @@ def main() -> None:
             ground_mask = batch["has_grounding"].bool()
             answer_mask = batch["has_answer"].bool()
             caption_mask = batch["has_caption"].bool()
+            pred_all = forward_task(model, batch, task="multitask")
             if bool(ground_mask.any()):
                 sub = subset_batch(batch, ground_mask)
-                pred = forward_task(model, sub, task="grounding")
+                pred = subset_output(pred_all, ground_mask)
                 item_loss, comps = grounding_loss(pred, sub["bbox"], sub["scale_label"], args)
                 loss = loss + args.grounding_loss_weight * item_loss
                 for key, value in comps.items():
                     component_sums[key] = component_sums.get(key, 0.0) + float(value.detach().cpu()) * sub["bbox"].shape[0]
             if bool(answer_mask.any()):
                 sub = subset_batch(batch, answer_mask)
-                pred = forward_task(model, sub, task="answer")
+                pred = subset_output(pred_all, answer_mask)
                 choice_rows = sub["choice_label"] >= 0
                 hash_rows = ~choice_rows
                 answer_losses = []
@@ -430,7 +463,7 @@ def main() -> None:
                     loss = loss + args.answer_loss_weight * torch.stack(answer_losses).mean()
             if bool(caption_mask.any()):
                 sub = subset_batch(batch, caption_mask)
-                pred = forward_task(model, sub, task="caption")
+                pred = subset_output(pred_all, caption_mask)
                 item_loss = caption_loss(pred["caption_embedding"], sub["caption_target"], args.caption_temperature)
                 loss = loss + args.caption_loss_weight * item_loss
                 component_sums["caption_nce"] = component_sums.get("caption_nce", 0.0) + float(item_loss.detach().cpu()) * sub["caption_target"].shape[0]
@@ -445,21 +478,22 @@ def main() -> None:
             total_loss = distributed_sum(total_loss, device)
             total_items = distributed_sum(total_items, device)
             component_sums = {
-                key: distributed_sum(value, device)
-                for key, value in component_sums.items()
+                key: distributed_sum(component_sums.get(key, 0.0), device)
+                for key in TRAIN_COMPONENT_KEYS
             }
         row = {"epoch": epoch, "train_loss": total_loss / max(total_items, 1)}
         row.update({f"train_{key}": value / max(total_items, 1) for key, value in component_sums.items()})
-        if val_loader is not None:
-            row.update({f"val_{key}": value for key, value in evaluate(model, val_loader, device, args).items()})
+        if val_loader is not None and is_rank0():
+            row.update({f"val_{key}": value for key, value in evaluate(unwrap_model(model), val_loader, device, args).items()})
             score = row.get("val_ground_acc50", 0.0) + row.get("val_answer_acc", 0.0) + row.get("val_caption_cos", 0.0)
             if score > best_score:
                 best_score = score
                 save_checkpoint("best_multitask.pt")
                 row["best_checkpoint"] = str(output_dir / "best_multitask.pt")
-        history.append(row)
         if is_rank0():
+            history.append(row)
             print(json.dumps(row, ensure_ascii=False, indent=2), flush=True)
+        maybe_barrier()
 
     save_checkpoint("uav_multitask_adapter.pt")
     if is_rank0():
