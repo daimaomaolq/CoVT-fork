@@ -80,10 +80,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distributed-eval", action="store_true")
     parser.add_argument("--debug-max-batches", type=int, default=0)
     parser.add_argument("--trace-batches", action="store_true")
+    parser.add_argument(
+        "--dist-backend",
+        default="nccl",
+        choices=("nccl", "gloo"),
+        help="Process group backend. Use gloo with --grad-sync-device cpu to avoid CUDA/NCCL gradient sync failures.",
+    )
+    parser.add_argument(
+        "--grad-sync-device",
+        default="cuda",
+        choices=("cuda", "cpu"),
+        help="Where gradients are all-reduced. cpu uses one flattened Gloo all-reduce then copies grads back to CUDA.",
+    )
     return parser.parse_args()
 
 
-def setup_manual_distributed() -> tuple[bool, int, torch.device]:
+def setup_manual_distributed(backend: str) -> tuple[bool, int, torch.device]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size <= 1:
         return False, 0, torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -92,7 +104,10 @@ def setup_manual_distributed() -> tuple[bool, int, torch.device]:
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
-    dist.init_process_group(backend="nccl", device_id=device)
+    if backend == "nccl":
+        dist.init_process_group(backend=backend, device_id=device)
+    else:
+        dist.init_process_group(backend=backend)
     return True, local_rank, device
 
 
@@ -128,10 +143,27 @@ def zero_touch_trainable_parameters(model: torch.nn.Module) -> torch.Tensor | No
     return total
 
 
-def average_gradients(model: torch.nn.Module, distributed: bool) -> None:
+def average_gradients(
+    model: torch.nn.Module,
+    distributed: bool,
+    sync_device: str,
+) -> None:
     if not distributed:
         return
     world_size = float(dist.get_world_size())
+    if sync_device == "cpu":
+        grads = [param.grad for param in model.parameters() if param.grad is not None]
+        if not grads:
+            return
+        flat = torch.cat([grad.detach().reshape(-1).cpu() for grad in grads])
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+        flat.div_(world_size)
+        offset = 0
+        for grad in grads:
+            length = grad.numel()
+            grad.copy_(flat[offset : offset + length].view_as(grad).to(grad.device))
+            offset += length
+        return
     for param in model.parameters():
         if param.grad is None:
             continue
@@ -197,7 +229,9 @@ def build_model(args: argparse.Namespace, first_batch: dict) -> tuple[UAVMultiTa
 
 def main() -> None:
     args = parse_args()
-    distributed, _local_rank, device = setup_manual_distributed()
+    if args.grad_sync_device == "cpu" and args.dist_backend != "gloo":
+        raise ValueError("--grad-sync-device cpu requires --dist-backend gloo.")
+    distributed, _local_rank, device = setup_manual_distributed(args.dist_backend)
     set_seed(args.seed)
     output_dir = Path(args.output_dir).expanduser().resolve()
     if is_rank0():
@@ -223,7 +257,13 @@ def main() -> None:
     if is_rank0():
         print(
             json.dumps(
-                {"status": "using_manual_grad_all_reduce", "distributed": distributed, "world_size": dist.get_world_size() if distributed else 1},
+                {
+                    "status": "using_manual_grad_all_reduce",
+                    "distributed": distributed,
+                    "world_size": dist.get_world_size() if distributed else 1,
+                    "dist_backend": args.dist_backend,
+                    "grad_sync_device": args.grad_sync_device,
+                },
                 ensure_ascii=False,
             ),
             flush=True,
@@ -299,7 +339,7 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             trace(args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_backward_done", device)
-            average_gradients(model, distributed)
+            average_gradients(model, distributed, args.grad_sync_device)
             trace(args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_grad_all_reduce_done", device)
             optimizer.step()
             trace(args.trace_batches, f"epoch_{epoch}_batch_{batch_index}_step_done", device)
