@@ -239,10 +239,16 @@ def main() -> None:
     first_batch = next(iter(train_loader))
     trace_rank(accelerator, args.trace_batches, "first_batch_loaded_cpu")
     model, config = build_model(args, first_batch)
+    model = model.to(accelerator.device)
+    trace_rank(accelerator, args.trace_batches, "model_on_device")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     trace_rank(accelerator, args.trace_batches, "model_optimizer_built")
-    model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
-    trace_rank(accelerator, args.trace_batches, "accelerator_prepare_done")
+    model = accelerator.prepare(model)
+    trace_rank(accelerator, args.trace_batches, "accelerator_prepare_model_done")
+    optimizer = accelerator.prepare(optimizer)
+    trace_rank(accelerator, args.trace_batches, "accelerator_prepare_optimizer_done")
+    train_loader = accelerator.prepare(train_loader)
+    trace_rank(accelerator, args.trace_batches, "accelerator_prepare_train_loader_done")
 
     val_loader = None
     should_eval = bool(args.val_index) and (
