@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--giou-loss-weight", type=float, default=1.0)
     parser.add_argument("--delta-loss-weight", type=float, default=0.005)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--ddp-eval",
+        action="store_true",
+        help="Run rank-0 validation inside DDP training. Disabled by default for stability.",
+    )
     return parser.parse_args()
 
 
@@ -282,6 +287,24 @@ def zero_touch_multitask_outputs(pred: dict[str, torch.Tensor]) -> torch.Tensor 
     return total
 
 
+def zero_touch_trainable_parameters(model: torch.nn.Module) -> torch.Tensor | None:
+    """Guarantee every trainable parameter participates in DDP backward.
+
+    Current UAVIT resolvable data has no choice/caption samples, while the model
+    still owns those heads. A zero-valued parameter touch is the conservative
+    DDP-safe path: it does not change the loss, but it prevents reducer failures
+    from per-batch task sparsity.
+    """
+
+    total = None
+    for param in unwrap_model(model).parameters():
+        if not param.requires_grad:
+            continue
+        term = param.sum() * 0.0
+        total = term if total is None else total + term
+    return total
+
+
 TRAIN_COMPONENT_KEYS = (
     "ground_bbox",
     "ground_giou",
@@ -373,7 +396,7 @@ def main() -> None:
         maybe_barrier()
     train_loader, train_sampler = make_loader(args, args.train_index, shuffle=True, distributed=distributed)
     val_loader = None
-    if is_rank0():
+    if is_rank0() and (not distributed or args.ddp_eval):
         val_loader, _ = make_loader(args, args.val_index, shuffle=False, distributed=False)
     if train_loader is None:
         raise ValueError("At least one --train-index is required.")
@@ -410,6 +433,7 @@ def main() -> None:
             device_ids=[local_rank],
             output_device=local_rank,
             find_unused_parameters=False,
+            static_graph=True,
         )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     config = {
@@ -472,6 +496,9 @@ def main() -> None:
             graph_touch = zero_touch_multitask_outputs(pred_all)
             if graph_touch is not None:
                 loss = loss + graph_touch
+            param_touch = zero_touch_trainable_parameters(model)
+            if param_touch is not None:
+                loss = loss + param_touch
             if bool(ground_mask.any()):
                 sub = subset_batch(batch, ground_mask)
                 pred = subset_output(pred_all, ground_mask)
