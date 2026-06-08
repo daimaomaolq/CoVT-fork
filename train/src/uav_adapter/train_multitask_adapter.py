@@ -255,6 +255,33 @@ def maybe_barrier() -> None:
             dist.barrier()
 
 
+def zero_touch_multitask_outputs(pred: dict[str, torch.Tensor]) -> torch.Tensor | None:
+    """Attach all always-computed heads to the graph for DDP synchronization.
+
+    The multitask forward returns several heads, but a given mini-batch may only
+    use a subset of them for non-zero losses. Touching the head outputs with a
+    zero coefficient keeps the per-rank autograd graph structurally consistent
+    without changing optimization.
+    """
+
+    keys = (
+        "candidate_bboxes",
+        "candidate_scores",
+        "candidate_scale_logits",
+        "answer_logits",
+        "choice_logits",
+        "caption_embedding",
+    )
+    total = None
+    for key in keys:
+        value = pred.get(key)
+        if not (torch.is_tensor(value) and value.requires_grad and torch.is_floating_point(value)):
+            continue
+        term = value.sum() * 0.0
+        total = term if total is None else total + term
+    return total
+
+
 TRAIN_COMPONENT_KEYS = (
     "ground_bbox",
     "ground_giou",
@@ -382,7 +409,7 @@ def main() -> None:
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True,
+            find_unused_parameters=False,
         )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     config = {
@@ -442,6 +469,9 @@ def main() -> None:
             answer_mask = batch["has_answer"].bool()
             caption_mask = batch["has_caption"].bool()
             pred_all = forward_task(model, batch, task="multitask")
+            graph_touch = zero_touch_multitask_outputs(pred_all)
+            if graph_touch is not None:
+                loss = loss + graph_touch
             if bool(ground_mask.any()):
                 sub = subset_batch(batch, ground_mask)
                 pred = subset_output(pred_all, ground_mask)
