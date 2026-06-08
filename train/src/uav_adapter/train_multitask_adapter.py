@@ -227,8 +227,9 @@ def setup_distributed(args: argparse.Namespace) -> tuple[bool, int, torch.device
         raise RuntimeError("Distributed training requires CUDA devices.")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
-    return True, local_rank, torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}")
+    dist.init_process_group(backend="nccl", device_id=device)
+    return True, local_rank, device
 
 
 def is_rank0() -> bool:
@@ -248,7 +249,10 @@ def distributed_sum(value: float, device: torch.device) -> float:
 
 def maybe_barrier() -> None:
     if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
 
 
 TRAIN_COMPONENT_KEYS = (
@@ -339,7 +343,7 @@ def main() -> None:
     if is_rank0():
         output_dir.mkdir(parents=True, exist_ok=True)
     if distributed:
-        dist.barrier()
+        maybe_barrier()
     train_loader, train_sampler = make_loader(args, args.train_index, shuffle=True, distributed=distributed)
     val_loader = None
     if is_rank0():
