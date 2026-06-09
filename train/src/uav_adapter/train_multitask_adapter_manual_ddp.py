@@ -81,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-max-batches", type=int, default=0)
     parser.add_argument("--trace-batches", action="store_true")
     parser.add_argument(
+        "--resume-checkpoint",
+        default=None,
+        help="Resume model/history from a previous multitask adapter checkpoint. --epochs is treated as the target total epoch.",
+    )
+    parser.add_argument(
         "--dist-backend",
         default="nccl",
         choices=("nccl", "gloo"),
@@ -93,6 +98,59 @@ def parse_args() -> argparse.Namespace:
         help="Where gradients are all-reduced. cpu uses one flattened Gloo all-reduce then copies grads back to CUDA.",
     )
     return parser.parse_args()
+
+
+ARCH_CONFIG_TO_ARG = {
+    "hidden_dim": "hidden_dim",
+    "dropout": "dropout",
+    "num_region_queries": "num_region_queries",
+    "num_heads": "num_heads",
+    "query_vocab_size": "query_vocab_size",
+    "query_max_len": "query_max_len",
+    "max_lm_query_tokens": "max_lm_query_tokens",
+    "query_encoder_type": "query_encoder_type",
+    "query_layers": "query_layers",
+    "category_vocab_size": "category_vocab_size",
+    "region_vocab_size": "region_vocab_size",
+    "rule_vocab_size": "rule_vocab_size",
+    "max_sam_tokens": "max_sam_tokens",
+    "max_dino_tokens": "max_dino_tokens",
+    "anchor_delta_scale": "anchor_delta_scale",
+    "answer_vocab_size": "answer_vocab_size",
+    "max_choices": "max_choices",
+    "caption_embedding_dim": "caption_embedding_dim",
+}
+
+
+def apply_resume_arch_config(args: argparse.Namespace, checkpoint: dict) -> None:
+    config = checkpoint.get("config") or {}
+    for config_key, arg_key in ARCH_CONFIG_TO_ARG.items():
+        if config_key in config:
+            setattr(args, arg_key, config[config_key])
+    if "use_query_metadata" in config:
+        args.disable_query_metadata = not bool(config["use_query_metadata"])
+
+
+def history_best_score(history: list[dict]) -> float:
+    best = float("-inf")
+    for row in history:
+        score = (
+            float(row.get("val_ground_acc50", 0.0))
+            + float(row.get("val_answer_acc", 0.0))
+            + float(row.get("val_caption_cos", 0.0))
+        )
+        best = max(best, score)
+    return best
+
+
+def last_history_epoch(history: list[dict]) -> int:
+    epochs = []
+    for row in history:
+        try:
+            epochs.append(int(row.get("epoch", 0)))
+        except (TypeError, ValueError):
+            pass
+    return max(epochs, default=0)
 
 
 def setup_manual_distributed(backend: str) -> tuple[bool, int, torch.device]:
@@ -238,16 +296,33 @@ def main() -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
     maybe_barrier()
 
+    resume_checkpoint = None
+    if args.resume_checkpoint:
+        resume_path = Path(args.resume_checkpoint).expanduser().resolve()
+        resume_checkpoint = torch.load(resume_path, map_location="cpu")
+        apply_resume_arch_config(args, resume_checkpoint)
+
     train_loader, train_sampler = make_loader(args, args.train_index, shuffle=True, distributed=distributed)
     if train_loader is None:
         raise ValueError("At least one --train-index is required.")
     trace(args.trace_batches, "train_loader_ready", device)
     first_batch = next(iter(train_loader))
     trace(args.trace_batches, "first_batch_loaded_cpu", device)
+
     model, config = build_model(args, first_batch)
     model = model.to(device)
+    if resume_checkpoint is not None:
+        model.load_state_dict(resume_checkpoint["model"], strict=True)
+        trace(args.trace_batches, "resume_model_loaded", device)
     trace(args.trace_batches, "model_on_device", device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if resume_checkpoint is not None and resume_checkpoint.get("optimizer") is not None:
+        optimizer.load_state_dict(resume_checkpoint["optimizer"])
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device)
+        trace(args.trace_batches, "resume_optimizer_loaded", device)
     trace(args.trace_batches, "optimizer_built", device)
 
     val_loader = None
@@ -263,24 +338,62 @@ def main() -> None:
                     "world_size": dist.get_world_size() if distributed else 1,
                     "dist_backend": args.dist_backend,
                     "grad_sync_device": args.grad_sync_device,
+                    "resume_checkpoint": str(Path(args.resume_checkpoint).expanduser().resolve()) if args.resume_checkpoint else None,
                 },
                 ensure_ascii=False,
             ),
             flush=True,
         )
 
-    history: list[dict] = []
-    best_score = float("-inf")
+    history: list[dict] = list((resume_checkpoint or {}).get("history") or [])
+    best_score = history_best_score(history)
+    start_epoch = last_history_epoch(history) + 1
+    if is_rank0() and resume_checkpoint is not None:
+        print(
+            json.dumps(
+                {
+                    "status": "resumed",
+                    "start_epoch": start_epoch,
+                    "target_epoch": args.epochs,
+                    "history_rows": len(history),
+                    "best_score": best_score,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
 
     def save_checkpoint(name: str) -> None:
         if not is_rank0():
             return
         torch.save(
-            {"model": model.state_dict(), "config": config, "history": history, "args": vars(args)},
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "config": config,
+                "history": history,
+                "args": vars(args),
+            },
             output_dir / name,
         )
 
-    for epoch in range(1, args.epochs + 1):
+    if resume_checkpoint is not None and is_rank0() and not (output_dir / "best_multitask.pt").exists():
+        save_checkpoint("best_multitask.pt")
+
+    if start_epoch > args.epochs:
+        if is_rank0():
+            print(
+                json.dumps(
+                    {
+                        "status": "nothing_to_train",
+                        "start_epoch": start_epoch,
+                        "target_epoch": args.epochs,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+    for epoch in range(start_epoch, args.epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         model.train()
