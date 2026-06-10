@@ -208,7 +208,7 @@ def main() -> None:
                 "question_cn": row.get("question_cn"),
                 "question_e_cn": row.get("question_e_cn"),
                 "dataset": row.get("dataset"),
-                "category": row.get("class") or "dvgbench_object",
+                "category": str(row.get("class") or "dvgbench_object").strip() or "dvgbench_object",
                 "category_id": 0,
                 "split": row.get("split") or args.split,
                 "source": "DVGBench",

@@ -135,7 +135,7 @@ def main() -> None:
                     iou.cpu().tolist(),
                 ):
                     row_meta = meta.get(str(sample_id), {})
-                    cls = str(row_meta.get("category") or row_meta.get("class") or "unknown")
+                    cls = str(row_meta.get("category") or row_meta.get("class") or "unknown").strip() or "unknown"
                     per_class_total[cls] += 1
                     per_class_acc[cls] += 1.0 if item_iou >= 0.5 else 0.0
                     if pred_handle is not None:
