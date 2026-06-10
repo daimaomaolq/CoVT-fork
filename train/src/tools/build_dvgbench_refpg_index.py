@@ -123,6 +123,7 @@ def _bbox_norm(bbox: Any, width: int, height: int) -> list[float] | None:
 
 def _safe_id(value: Any, fallback: str) -> str:
     text = str(value if value is not None else fallback)
+    text = text.strip().strip("'\"")
     keep = []
     for char in text:
         keep.append(char if char.isalnum() or char in ("-", "_", ".") else "_")
@@ -153,6 +154,7 @@ def main() -> None:
     source_root = Path(args.source_image_root).expanduser().resolve() if args.source_image_root else None
     image_map = _build_image_map(source_root)
     counts: Counter[str] = Counter()
+    seen_sample_ids: set[str] = set()
 
     with output.open("w", encoding="utf-8") as handle:
         for idx, row in enumerate(dataset):
@@ -181,7 +183,14 @@ def main() -> None:
             question_id = row.get("question_id", idx)
             image_id = row.get("image_id", f"{idx:06d}.jpg")
             stem = Path(str(image_id)).stem
-            sample_id = f"dvgbench_{args.split}_{_safe_id(question_id, str(idx))}_{args.query_field}"
+            dataset_name = _safe_id(row.get("dataset"), "dataset")
+            sample_id = (
+                f"dvgbench_{args.split}_{idx:06d}_{dataset_name}_"
+                f"{_safe_id(question_id, str(idx))}_{_safe_id(stem, str(idx))}_{args.query_field}"
+            )
+            if sample_id in seen_sample_ids:
+                raise ValueError(f"Duplicate DVGBench sample_id generated: {sample_id}")
+            seen_sample_ids.add(sample_id)
             image_path = image_root / f"{_safe_id(stem, str(idx))}.jpg"
             if args.overwrite_images or not image_path.exists():
                 image.save(image_path, quality=args.jpeg_quality, optimize=True)
@@ -215,6 +224,7 @@ def main() -> None:
             if row.get("dataset"):
                 counts[f"dataset_{row['dataset']}"] += 1
 
+    counts["unique_sample_id"] = len(seen_sample_ids)
     print(json.dumps(dict(counts), ensure_ascii=False, indent=2))
 
 
