@@ -35,6 +35,9 @@ def patch_transformers_generation_for_extraction() -> None:
         return
 
     class GenerationMixin:
+        def prepare_inputs_for_generation(self, *args, **kwargs):
+            raise RuntimeError("Generation is disabled in query-hidden extraction.")
+
         def generate(self, *args, **kwargs):
             raise RuntimeError("Generation is disabled in query-hidden extraction.")
 
