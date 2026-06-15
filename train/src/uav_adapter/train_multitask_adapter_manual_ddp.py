@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         help="Resume model/history from a previous multitask adapter checkpoint. --epochs is treated as the target total epoch.",
     )
     parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Initialize model weights/config from a checkpoint, but start fresh optimizer/history at epoch 1.",
+    )
+    parser.add_argument(
         "--dist-backend",
         default="nccl",
         choices=("nccl", "gloo"),
@@ -297,10 +302,17 @@ def main() -> None:
     maybe_barrier()
 
     resume_checkpoint = None
+    init_checkpoint = None
+    if args.resume_checkpoint and args.init_checkpoint:
+        raise ValueError("Use only one of --resume-checkpoint or --init-checkpoint.")
     if args.resume_checkpoint:
         resume_path = Path(args.resume_checkpoint).expanduser().resolve()
         resume_checkpoint = torch.load(resume_path, map_location="cpu")
         apply_resume_arch_config(args, resume_checkpoint)
+    if args.init_checkpoint:
+        init_path = Path(args.init_checkpoint).expanduser().resolve()
+        init_checkpoint = torch.load(init_path, map_location="cpu")
+        apply_resume_arch_config(args, init_checkpoint)
 
     train_loader, train_sampler = make_loader(args, args.train_index, shuffle=True, distributed=distributed)
     if train_loader is None:
@@ -314,6 +326,9 @@ def main() -> None:
     if resume_checkpoint is not None:
         model.load_state_dict(resume_checkpoint["model"], strict=True)
         trace(args.trace_batches, "resume_model_loaded", device)
+    if init_checkpoint is not None:
+        model.load_state_dict(init_checkpoint["model"], strict=True)
+        trace(args.trace_batches, "init_model_loaded", device)
     trace(args.trace_batches, "model_on_device", device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     if resume_checkpoint is not None and resume_checkpoint.get("optimizer") is not None:
@@ -339,6 +354,7 @@ def main() -> None:
                     "dist_backend": args.dist_backend,
                     "grad_sync_device": args.grad_sync_device,
                     "resume_checkpoint": str(Path(args.resume_checkpoint).expanduser().resolve()) if args.resume_checkpoint else None,
+                    "init_checkpoint": str(Path(args.init_checkpoint).expanduser().resolve()) if args.init_checkpoint else None,
                 },
                 ensure_ascii=False,
             ),
@@ -357,6 +373,19 @@ def main() -> None:
                     "target_epoch": args.epochs,
                     "history_rows": len(history),
                     "best_score": best_score,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    if is_rank0() and init_checkpoint is not None:
+        print(
+            json.dumps(
+                {
+                    "status": "initialized",
+                    "start_epoch": start_epoch,
+                    "target_epoch": args.epochs,
+                    "init_checkpoint": str(Path(args.init_checkpoint).expanduser().resolve()),
                 },
                 ensure_ascii=False,
             ),
