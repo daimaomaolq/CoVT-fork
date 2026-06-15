@@ -279,6 +279,8 @@ def main() -> None:
                 "query": query,
                 "bbox": row.get("bbox"),
                 "bbox_norm": bbox_norm,
+                "task_type": "grounding",
+                "task_tag": f"dvgbench_{args.query_field}",
                 "image_id": image_id,
                 "question_id": question_id,
                 "question": row.get("question"),
