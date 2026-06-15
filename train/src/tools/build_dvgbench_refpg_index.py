@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hf-dataset", default="erenzhou/DVGBench")
     parser.add_argument("--split", default="test")
+    parser.add_argument(
+        "--input-jsonl",
+        default=None,
+        help=(
+            "Optional local DVGBench JSONL. When set, rows are read from this "
+            "file instead of HuggingFace. A permissive fallback parser is used "
+            "for copies with broken non-English text fields."
+        ),
+    )
     parser.add_argument(
         "--query-field",
         default="question_e",
@@ -65,6 +75,67 @@ def _build_image_map(root: Path | None) -> dict[str, Path]:
         if path.is_file() and path.suffix.lower() in suffixes:
             mapping.setdefault(path.name, path)
     return mapping
+
+
+def _regex_field(line: str, key: str) -> str | None:
+    pattern = re.compile(rf'"{re.escape(key)}"\s*:\s*"(?P<value>.*?)"(?=\s*,\s*"|\s*}})')
+    match = pattern.search(line)
+    return match.group("value") if match else None
+
+
+def _regex_int_field(line: str, key: str) -> int | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*(?P<value>-?\d+)', line)
+    return int(match.group("value")) if match else None
+
+
+def _regex_bbox(line: str) -> list[float] | None:
+    match = re.search(r'"bbox"\s*:\s*\[(?P<value>[^\]]+)\]', line)
+    if not match:
+        return None
+    try:
+        values = [float(part.strip()) for part in match.group("value").split(",")]
+    except ValueError:
+        return None
+    return values[:4] if len(values) >= 4 else None
+
+
+def _parse_local_row(line: str, idx: int) -> dict[str, Any] | None:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        pass
+
+    row: dict[str, Any] = {
+        "question_id": _regex_int_field(line, "question_id") or idx,
+        "image_id": _regex_field(line, "image_id"),
+        "bbox": _regex_bbox(line),
+        "question": _regex_field(line, "question"),
+        "question_e": _regex_field(line, "question_e"),
+        "dataset": _regex_field(line, "dataset"),
+        "class": _regex_field(line, "class"),
+        "split": _regex_field(line, "split"),
+    }
+    if not row["image_id"] or not row["bbox"]:
+        return None
+    return row
+
+
+def _load_local_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for idx, line in enumerate(handle):
+            line = line.strip()
+            if not line:
+                continue
+            row = _parse_local_row(line, idx)
+            if row is None:
+                skipped += 1
+                continue
+            rows.append(row)
+    if skipped:
+        print(f"[dvgbench] skipped {skipped} unparsable local rows", flush=True)
+    return rows
 
 
 def _load_image(row: dict[str, Any], image_map: dict[str, Path]):
@@ -133,11 +204,18 @@ def _safe_id(value: Any, fallback: str) -> str:
 def main() -> None:
     args = parse_args()
 
-    from datasets import load_dataset
+    if args.input_jsonl:
+        dataset = _load_local_rows(Path(args.input_jsonl).expanduser().resolve())
+        print(f"local_jsonl: {args.input_jsonl}")
+        print(f"num_rows: {len(dataset)}")
+        column_names = sorted({key for row in dataset for key in row.keys()})
+    else:
+        from datasets import load_dataset
 
-    dataset = load_dataset(args.hf_dataset, split=args.split)
-    print(dataset)
-    print("columns:", dataset.column_names)
+        dataset = load_dataset(args.hf_dataset, split=args.split)
+        print(dataset)
+        column_names = dataset.column_names
+    print("columns:", column_names)
     if len(dataset):
         first = dataset[0]
         print("first row:")
