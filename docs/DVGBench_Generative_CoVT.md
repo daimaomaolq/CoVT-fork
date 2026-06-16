@@ -94,6 +94,7 @@ PYTHONPATH="$REPO/train/src" CUDA_VISIBLE_DEVICES=0 $ENV_PY -m training.train \
   --stage_0_step 0 \
   --stage_1_step 0 \
   --stage_2_step 0 \
+  --use_liger False \
   --disable_flash_attn2 True \
   --report_to none
 ```

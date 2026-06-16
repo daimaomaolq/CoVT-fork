@@ -7,12 +7,26 @@ import numpy as np
 import transformers.models.qwen2_vl.modeling_qwen2_vl
 import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl
 from flash_attn.layers.rotary import apply_rotary_emb
-from liger_kernel.transformers.fused_linear_cross_entropy import (
-    LigerFusedLinearCrossEntropyLoss
-)
-from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
-from liger_kernel.transformers.rms_norm import LigerRMSNorm
-from liger_kernel.transformers.qwen2vl_mrope import liger_multimodal_rotary_pos_emb
+
+try:
+    from liger_kernel.transformers.fused_linear_cross_entropy import (
+        LigerFusedLinearCrossEntropyLoss
+    )
+    from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
+    from liger_kernel.transformers.rms_norm import LigerRMSNorm
+    from liger_kernel.transformers.qwen2vl_mrope import liger_multimodal_rotary_pos_emb
+except ImportError:
+    LigerFusedLinearCrossEntropyLoss = None
+    LigerSwiGLUMLP = None
+    LigerRMSNorm = None
+    liger_multimodal_rotary_pos_emb = None
+
+
+def require_liger() -> None:
+    if LigerFusedLinearCrossEntropyLoss is None:
+        raise RuntimeError(
+            "liger_kernel is not installed. Re-run with --use_liger False or install liger-kernel."
+        )
 
 
 def apply_rotary_pos_emb_flashatt_fp32(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
@@ -24,12 +38,14 @@ def apply_rotary_pos_emb_flashatt_fp32(tensor: torch.Tensor, freqs: torch.Tensor
 
 def replace_qwen_2_with_mixed_modality_forward(use_liger=True):
     if use_liger:
+        require_liger()
         transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration.forward = qwen_2_mixed_modality_forward_with_flce
     else:
         transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration.forward = qwen_2_mixed_modality_forward
 
 def replace_qwen2_5_with_mixed_modality_forward(use_liger=True):
     if use_liger:
+        require_liger()
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_with_flce
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = (apply_rotary_pos_emb_flashatt_fp32)
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2MLP = LigerSwiGLUMLP
