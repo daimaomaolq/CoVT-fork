@@ -13,7 +13,11 @@ from monkey_patch_forward import replace_qwen2_5_with_mixed_modality_forward, re
 
 from training.covt_qwen2_5_vl import CoVTForConditionalGeneration
 from training.constants import *
-from deepspeed import zero
+
+try:
+    from deepspeed import zero
+except ImportError:
+    zero = None
 
 local_rank = None
 
@@ -294,6 +298,10 @@ def train():
     lm_head = model.get_output_embeddings()
     p = qwen_embed.weight
     if hasattr(p, 'ds_id'):
+        if zero is None:
+            raise RuntimeError(
+                "Embedding weights are managed by DeepSpeed ZeRO, but deepspeed is not installed."
+            )
         with zero.GatheredParameters([p]):
             old_len = p.data.shape[0]
     else:

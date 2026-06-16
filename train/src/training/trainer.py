@@ -1,7 +1,6 @@
 import os
 import torch
 import torch.nn as nn
-from deepspeed.utils import safe_get_full_grad
 
 from transformers import Trainer, TrainerCallback
 from transformers.trainer import (
@@ -25,11 +24,20 @@ from transformers.modeling_utils import PreTrainedModel
 from peft import PeftModel
 from training.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3
 
-def maybe_zero_3(param, ignore_status=False, name=None):
+try:
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+except ImportError:
+    zero = None
+    ZeroParamStatus = None
 
+
+def maybe_zero_3(param, ignore_status=False, name=None):
     if hasattr(param, "ds_id"):
+        if zero is None or ZeroParamStatus is None:
+            raise RuntimeError(
+                "This parameter is managed by DeepSpeed ZeRO, but deepspeed is not installed."
+            )
         if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if not ignore_status:
                 print(name, "no ignore status")
@@ -44,7 +52,7 @@ class QwenTrainer(Trainer):
     def __init__(self, processor, *args, **kwargs):
         super(QwenTrainer, self).__init__(*args, **kwargs)
         self.processor = processor
-        
+
     def evaluation_loop(self, dataloader, description, prediction_loss_only = None, ignore_keys = None, metric_key_prefix = "eval"):
         print("I got it! Maybe for future usage")
         return super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix)
@@ -55,10 +63,10 @@ class QwenTrainer(Trainer):
         We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
         Trainer's init through `optimizers`, or subclass and override this method in a subclass.
         """
-        
+
         if is_sagemaker_mp_enabled():
             return super().create_optimizer()
-        
+
 
         opt_model = self.model
 
@@ -79,7 +87,7 @@ class QwenTrainer(Trainer):
 
             if len(lr_mapper) > 0:
                 special_lr_parameters = merger_parameters + visual_parameters
-                
+
                 optimizer_grouped_parameters = [
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in special_lr_parameters and p.requires_grad)],
@@ -90,8 +98,8 @@ class QwenTrainer(Trainer):
                         "weight_decay": 0.0,
                     },
                 ]
-                
-                if visual_parameters: 
+
+                if visual_parameters:
                     optimizer_grouped_parameters.extend(
                         [
                             {
@@ -106,8 +114,8 @@ class QwenTrainer(Trainer):
                             },
                         ]
                     )
-                
-                if merger_parameters: 
+
+                if merger_parameters:
                     optimizer_grouped_parameters.extend(
                         [
                             {
@@ -159,7 +167,7 @@ class QwenTrainer(Trainer):
                         manager.register_module_override(module, "weight", {"optim_bits": 32})
                         logger.debug(f"bitsandbytes: will optimize {module} in fp32")
                 logger.info(f"skipped: {skipped/2**20}M params")
-        
+
         self.optimizer.param_groups
         opt = self.optimizer
         print(f"[Optimizer] {opt.__class__.__name__}")
@@ -174,15 +182,15 @@ class QwenTrainer(Trainer):
             #         if p is param:
             #             print(f"  - {name}")
             #             break
-        
+
         # self.optimizer.add_param_group({
         #                 "params": [p for n, p in opt_model.named_parameters() if ("query_vectors" in n)],
         #                 "weight_decay": self.args.weight_decay,
         #             })
         # import ipdb; ipdb.set_trace()
-        
+
         return self.optimizer
-    
+
 
     def _save_checkpoint(self, model, trial):
         if self.args.lora_enable:
@@ -266,10 +274,10 @@ class QwenTrainer(Trainer):
     #     for name, param in model.named_parameters():
     #         if 'visual' in name and param.requires_grad:
     #             print(f"Training parameter {name}")
-    # 
+    #
     #     return super().training_step(model, inputs)
-    
-    
+
+
 class UnfreezeLoRACallback(TrainerCallback):
     def __init__(self, unfreeze_step):
         self.unfreeze_step = unfreeze_step
@@ -294,26 +302,26 @@ class UnfreezeLoRACallback(TrainerCallback):
 class ResumeDatasetCallback(TrainerCallback):
     """
     Callback is to sync the cur_step of the Dataset when resuming training from checkpoint.
-    
+
     When training is resumed from checkpoint, global_step is correctly loaded, but the cur_step of the Dataset is default to 0. This callback will detect whether the training is resumed, and if so, calculate and set the correct cur_step based on global_step.
-    
+
     The formula for calculation: resumed_cur_step = global_step * batch_size * gradient_accumulation_steps
     """
-    
+
     def __init__(self, train_dataset):
         self.train_dataset = train_dataset
         self._resumed = False
-    
+
     def on_train_begin(self, args, state, control, **kwargs):
         if state.global_step > 0 and not self._resumed:
             samples_per_step = args.per_device_train_batch_size * args.gradient_accumulation_steps
             resumed_cur_step = state.global_step * samples_per_step
-            
+
             self.train_dataset.set_cur_step(resumed_cur_step)
             self._resumed = True
-            
+
             print(f"[ResumeDatasetCallback] Resumed training from global_step={state.global_step}")
             print(f"[ResumeDatasetCallback] Dataset cur_step set to {resumed_cur_step}")
             print(f"[ResumeDatasetCallback] (batch_size={args.per_device_train_batch_size}, "
                   f"grad_accum={args.gradient_accumulation_steps})")
-            
+

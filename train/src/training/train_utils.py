@@ -3,10 +3,20 @@ import torch
 import logging
 
 
-def maybe_zero_3(param, ignore_status=False, name=None):
+try:
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+except ImportError:
+    zero = None
+    ZeroParamStatus = None
+
+
+def maybe_zero_3(param, ignore_status=False, name=None):
     if hasattr(param, "ds_id"):
+        if zero is None or ZeroParamStatus is None:
+            raise RuntimeError(
+                "This parameter is managed by DeepSpeed ZeRO, but deepspeed is not installed."
+            )
         if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if not ignore_status:
                 logging.warning(f"{name}: param.ds_status != ZeroParamStatus.NOT_AVAILABLE: {param.ds_status}")
