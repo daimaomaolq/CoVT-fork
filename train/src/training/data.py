@@ -8,17 +8,9 @@ import ujson as json
 from torch.utils.data import Dataset
 from qwen_vl_utils import process_vision_info
 from PIL import Image
-from transformers import AutoImageProcessor
 import re
 import numpy as np
-import cv2
-from torchvision import transforms
 import random
-
-from segment_anything import build_sam_vit_h, sam_model_registry, SamPredictor
-from src.anchors.DepthAnything.depth_anything_v2.dpt import DepthAnythingV2
-from diffusers import AutoencoderKL
-from transformers import AutoModel, CLIPImageProcessor
 
 from .params import DataArguments
 from .constants import *
