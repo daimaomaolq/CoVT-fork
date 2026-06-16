@@ -66,7 +66,7 @@ if [ ! -d "$MODEL_PATH" ]; then export MODEL_PATH=Wakals/CoVT-7B-seg_depth_dino;
 export OUT_DIR=/root/autodl-tmp/outputs/covt_uav_refpg_v8_cleanenv_20260527/checkpoints/dvgbench_generative_covt_question_lora_v1
 mkdir -p "$OUT_DIR"
 
-CUDA_VISIBLE_DEVICES=0 $ENV_PY -m training.train \
+PYTHONPATH="$REPO/train/src" CUDA_VISIBLE_DEVICES=0 $ENV_PY -m training.train \
   --model_id "$MODEL_PATH" \
   --model_path "$MODEL_PATH" \
   --anchor_model_id "['sam','dino']" \
@@ -101,7 +101,7 @@ CUDA_VISIBLE_DEVICES=0 $ENV_PY -m training.train \
 For two GPUs, use the environment's Python, not base `torchrun`:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 $ENV_PY -m torch.distributed.run --nproc_per_node=2 \
+PYTHONPATH="$REPO/train/src" CUDA_VISIBLE_DEVICES=0,1 $ENV_PY -m torch.distributed.run --nproc_per_node=2 \
   train/src/training/train.py \
   ...same arguments...
 ```
