@@ -7,8 +7,9 @@ protocol as the DVGBench paper baseline, not the standalone UAV adapter head.
 ## Positioning
 
 - Baseline to cite: DVGBench paper `Qwen2.5-VL 7B` and `Qwen2.5-VL 7B SFT`.
-- Our main model: CoVT/Qwen with Seg+DINO visual thoughts, fine-tuned to output
-  DVGBench bbox tokens.
+- Our main model: the CoVT/Qwen Seg+DINO checkpoint, fine-tuned to output
+  DVGBench bbox tokens. This downstream LoRA stage reuses the trained CoVT
+  backbone and does not restart SAM/DINO teacher-alignment losses.
 - Adapter-head results are diagnostic only. They are useful for cached-token
   efficiency and fast failure analysis, but they are not comparable to the
   generative Qwen2.5-VL baseline table.
@@ -69,7 +70,7 @@ mkdir -p "$OUT_DIR"
 PYTHONPATH="$REPO/train/src" CUDA_VISIBLE_DEVICES=0 $ENV_PY -m training.train \
   --model_id "$MODEL_PATH" \
   --model_path "$MODEL_PATH" \
-  --anchor_model_id "['sam','dino']" \
+  --anchor_model_id "[]" \
   --data_path "$DVG_GEN_ROOT/dvg_train_question_sft.json" \
   --image_folder "$DVG_IMAGE_ROOT" \
   --output_dir "$OUT_DIR" \
