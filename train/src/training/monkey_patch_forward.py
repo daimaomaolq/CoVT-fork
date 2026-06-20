@@ -6,7 +6,10 @@ from torch.nn import CrossEntropyLoss
 import numpy as np
 import transformers.models.qwen2_vl.modeling_qwen2_vl
 import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl
-from flash_attn.layers.rotary import apply_rotary_emb
+try:
+    from flash_attn.layers.rotary import apply_rotary_emb
+except ImportError:
+    apply_rotary_emb = None
 
 try:
     from liger_kernel.transformers.fused_linear_cross_entropy import (
@@ -29,7 +32,15 @@ def require_liger() -> None:
         )
 
 
+def require_flash_attn() -> None:
+    if apply_rotary_emb is None:
+        raise RuntimeError(
+            "flash_attn is not installed. Re-run with --disable_flash_attn2 True or install flash-attn."
+        )
+
+
 def apply_rotary_pos_emb_flashatt_fp32(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    require_flash_attn()
     tensor_ = tensor.float()
     cos = freqs.cos().float()
     sin = freqs.sin().float()
@@ -46,6 +57,7 @@ def replace_qwen_2_with_mixed_modality_forward(use_liger=True):
 def replace_qwen2_5_with_mixed_modality_forward(use_liger=True):
     if use_liger:
         require_liger()
+        require_flash_attn()
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_with_flce
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = (apply_rotary_pos_emb_flashatt_fp32)
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2MLP = LigerSwiGLUMLP
@@ -53,7 +65,8 @@ def replace_qwen2_5_with_mixed_modality_forward(use_liger=True):
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_multimodal_rotary_pos_emb = (liger_multimodal_rotary_pos_emb)
     else:
         transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward
-        transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = (apply_rotary_pos_emb_flashatt_fp32)
+        if apply_rotary_emb is not None:
+            transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = (apply_rotary_pos_emb_flashatt_fp32)
 
 def qwen_2_mixed_modality_forward_with_flce(
     self,
@@ -674,3 +687,4 @@ def qwen2_5_mixed_modality_forward(
         attentions=outputs.attentions,
         rope_deltas=self.rope_deltas,
     )
+
