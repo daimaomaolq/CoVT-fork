@@ -444,11 +444,18 @@ class SupervisedDataset(Dataset):
             image_files = sources["image"]
             image_folder = self.data_args.image_folder
 
+            def resolve_image_file(image_file):
+                if isinstance(image_file, str) and image_folder and not image_file.startswith("http") and not os.path.isabs(image_file):
+                    candidate = os.path.join(image_folder, image_file)
+                    if os.path.exists(candidate):
+                        return candidate
+                return image_file
+
             if isinstance(image_files, str):
-                image_files = Image.open(image_files).convert("RGB")
+                image_files = Image.open(resolve_image_file(image_files)).convert("RGB")
                 image_files = [image_files]
             else:
-                image_files = [Image.open(image_file).convert("RGB") for image_file in image_files]
+                image_files = [Image.open(resolve_image_file(image_file)).convert("RGB") for image_file in image_files]
 
             images = []
             
