@@ -559,7 +559,10 @@ class AnchorModels():
         image = image.resize((256, 256))
         image_np = np.array(image)
         
-        masks = self.mask_generator.generate(image_np)
+        # SAM's mask generator converts intermediate tensors to numpy; keep it
+        # outside Trainer bf16 autocast so those tensors stay numpy-compatible.
+        with torch.amp.autocast("cuda", enabled=False):
+            masks = self.mask_generator.generate(image_np)
         masks = sorted(masks, key=lambda x: x["area"], reverse=True)[:4]
         # stability_score = [mask["stability_score"] for mask in masks]
         masks = [mask["segmentation"] for mask in masks if mask["stability_score"] > 0.95]
@@ -662,7 +665,10 @@ class AnchorModels():
         image = image.resize((256, 256))
         image_np = np.array(image)
         
-        masks = self.mask_generator.generate(image_np)
+        # SAM's mask generator converts intermediate tensors to numpy; keep it
+        # outside Trainer bf16 autocast so those tensors stay numpy-compatible.
+        with torch.amp.autocast("cuda", enabled=False):
+            masks = self.mask_generator.generate(image_np)
         # masks = self.filter_masks_by_area(masks, min_percentile=20, max_percentile=80)
         # Sort by predicted_iou * stability_score and take top 8
         masks = sorted(masks, key=lambda x: (x["predicted_iou"] * x["stability_score"]), reverse=True)[:8]
