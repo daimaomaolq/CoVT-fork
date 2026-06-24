@@ -139,7 +139,21 @@ def load_model(args: argparse.Namespace):
 
     dtype = resolve_dtype(args.torch_dtype, torch)
     device = resolve_device(args.device, torch)
-    processor = AutoProcessor.from_pretrained(args.model_path)
+    processor_candidates = []
+    if args.adapter_path:
+        adapter_path = Path(args.adapter_path)
+        if (adapter_path / "tokenizer_config.json").is_file() or (adapter_path / "preprocessor_config.json").is_file():
+            processor_candidates.append(str(adapter_path))
+    processor_candidates.append(args.model_path)
+    last_processor_error = None
+    for processor_path in processor_candidates:
+        try:
+            processor = AutoProcessor.from_pretrained(processor_path)
+            break
+        except Exception as err:
+            last_processor_error = err
+    else:
+        raise last_processor_error
     model = model_cls.from_pretrained(
         args.model_path,
         torch_dtype=dtype,
