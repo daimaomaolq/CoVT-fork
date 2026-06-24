@@ -131,6 +131,9 @@ class QwenTrainer(Trainer):
                         ]
                     )
             else:
+                projection_layer_lr = self.args.projection_layer_lr
+                if projection_layer_lr is None:
+                    projection_layer_lr = self.args.learning_rate
                 optimizer_grouped_parameters = [
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad and n not in projection_parameters)],
@@ -139,7 +142,7 @@ class QwenTrainer(Trainer):
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad and n in projection_parameters)],
                         "weight_decay": self.args.weight_decay,
-                        "lr": self.args.projection_layer_lr,
+                        "lr": projection_layer_lr,
                     },
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad and n not in projection_parameters)],
@@ -148,7 +151,7 @@ class QwenTrainer(Trainer):
                     {
                         "params": [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad and n in projection_parameters)],
                         "weight_decay": 0.0,
-                        "lr": self.args.projection_layer_lr,
+                        "lr": projection_layer_lr,
                     },
                 ]
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
