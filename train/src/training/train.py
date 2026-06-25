@@ -164,6 +164,7 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
     anchor_model_id = ast.literal_eval(model_args.anchor_model_id)
+    anchor_loss_weight = ast.literal_eval(model_args.anchor_loss_weight)
     
     if model_args.model_path is None:
         print("\033[91mWARNING: model_path is not provided, using model_id instead\033[0m")
@@ -218,7 +219,11 @@ def train():
         **bnb_model_from_pretrained_args
     )
     
+    if len(anchor_loss_weight) != 8:
+        raise ValueError("anchor_loss_weight must have 8 values: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip")
+    model.anchor_loss_weight = anchor_loss_weight
     model.get_anchor_model_ids(anchor_model_id)
+    print({"anchor_model_id": anchor_model_id, "anchor_loss_weight": anchor_loss_weight})
     model.align_vqa_only_stage = training_args.vqa_only_stage
 
     model.config.use_cache = False
