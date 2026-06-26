@@ -94,16 +94,51 @@ def get_video_info(video_path, min_pixels, max_pixels, fps):
 
     return video_input[0], video_kwargs
 
-def add_anchor_pad(user_input, anchor_nums, anchor_tokens):
-    # add anchor pad after VISION_END_TOKEN or ANCHOR_END_TOKEN
+def build_anchor_pads(anchor_nums, anchor_tokens):
     anchor_pads = []
     for anchor_num, anchor_token in zip(anchor_nums, anchor_tokens):
         anchor_pad = ANCHOR_START_TOKEN + anchor_token * anchor_num + ANCHOR_END_TOKEN
         anchor_pads.append(anchor_pad)
-    anchor_pads = "".join(anchor_pads)
+    return "".join(anchor_pads)
+
+def add_anchor_pad(user_input, anchor_nums, anchor_tokens):
+    # Legacy CoVT behavior: add anchor pads immediately after image tokens.
+    anchor_pads = build_anchor_pads(anchor_nums, anchor_tokens)
     if VISION_END_TOKEN in user_input:
         user_input = user_input.replace(VISION_END_TOKEN, VISION_END_TOKEN + anchor_pads)
     return user_input
+
+def add_anchor_pad_after_query(user_input, anchor_nums, anchor_tokens):
+    # Causal decoders can only condition anchor-token states on the query when
+    # the anchor tokens appear after the query and before the assistant turn.
+    anchor_pads = build_anchor_pads(anchor_nums, anchor_tokens)
+    if not anchor_pads:
+        return user_input
+
+    assistant_start = f"{DEFAULT_IM_START_TOKEN}assistant\n"
+    assistant_pos = user_input.rfind(assistant_start)
+    search_end = assistant_pos if assistant_pos >= 0 else len(user_input)
+    user_end_pos = user_input.rfind(DEFAULT_IM_END_TOKEN, 0, search_end)
+    prefix_source = user_input[:user_end_pos] if user_end_pos >= 0 else user_input
+    anchor_prefix = "" if prefix_source.endswith("\n") else "\n"
+    anchor_text = anchor_prefix + "Visual anchors: " + anchor_pads + "\n"
+
+    if user_end_pos >= 0:
+        return user_input[:user_end_pos] + anchor_text + user_input[user_end_pos:]
+    if VISION_END_TOKEN in user_input:
+        return user_input.replace(VISION_END_TOKEN, VISION_END_TOKEN + anchor_text, 1)
+    return user_input + anchor_text
+
+def add_anchor_pad_with_mode(user_input, anchor_nums, anchor_tokens, mode):
+    mode = (mode or "legacy").lower()
+    if mode in ("none", "off", "false"):
+        return user_input
+    if mode in ("legacy", "after_vision", "vision"):
+        return add_anchor_pad(user_input, anchor_nums, anchor_tokens)
+    if mode in ("query_tail", "after_query", "before_user_end"):
+        return add_anchor_pad_after_query(user_input, anchor_nums, anchor_tokens)
+    raise ValueError(f"Unknown anchor_prompt_mode: {mode}")
+
 
 def add_cot_anchor_pad_in_user_input(user_input, anchor_nums, anchor_tokens):
     if len(anchor_nums) == 0:
@@ -413,6 +448,8 @@ class SupervisedDataset(Dataset):
         self.stage_0_step = data_args.stage_0_step
         self.stage_1_step = data_args.stage_1_step
         self.stage_2_step = data_args.stage_2_step
+        self.anchor_prompt_mode = (data_args.anchor_prompt_mode or "legacy").lower()
+        self.anchor_response_mode = (data_args.anchor_response_mode or "legacy").lower()
         
         # for shuffle
         self.rng = np.random.default_rng(seed=random_seed)
@@ -546,7 +583,30 @@ class SupervisedDataset(Dataset):
                 gpt_response = f"{gpt_response['content']}\n{DEFAULT_IM_END_TOKEN}\n"
                 raise ValueError('Every man is a poet when he is in love')
             else:
-                if self.cur_step < self.stage_0_step:
+                if self.anchor_prompt_mode != "legacy" or self.anchor_response_mode != "legacy":
+                    user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}\n{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
+                    has_visual_token = DEFAULT_IMAGE_TOKEN in user_input or DEFAULT_VIDEO_TOKEN in user_input
+                    if has_visual_token:
+                        user_input = add_anchor_pad_with_mode(
+                            user_input,
+                            self.anchor_token_nums,
+                            self.anchor_tokens,
+                            self.anchor_prompt_mode,
+                        )
+
+                    response_content = gpt_response['content']
+                    response_mode = (self.anchor_response_mode or "none").lower()
+                    if response_mode == "cot" and has_visual_token:
+                        response_content = get_comt_data_in_response(
+                            response_content,
+                            self.anchor_token_nums,
+                            self.anchor_tokens,
+                            self.anchor_task_names,
+                        )
+                    elif response_mode not in ("none", "answer_only", "legacy"):
+                        raise ValueError(f"Unknown anchor_response_mode: {self.anchor_response_mode}")
+                    gpt_response = f"{response_content}\n{DEFAULT_IM_END_TOKEN}\n"
+                elif self.cur_step < self.stage_0_step:
                     user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}\n{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
                     user_input = add_anchor_pad(user_input, self.anchor_token_nums, self.anchor_tokens)
                     gpt_response = f"{gpt_response['content']}\n{DEFAULT_IM_END_TOKEN}\n"

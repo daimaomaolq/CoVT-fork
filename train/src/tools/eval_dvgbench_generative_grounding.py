@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -17,6 +18,22 @@ SRC_DIR = TRAIN_DIR / "src"
 for path in (str(SRC_DIR), str(TRAIN_DIR)):
     if path not in sys.path:
         sys.path.insert(0, path)
+
+from training.constants import (
+    ANCHOR_END_TOKEN,
+    ANCHOR_START_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+    DEPTH_PAD_TOKEN,
+    DINO_PAD_TOKEN,
+    INTERN_PAD_TOKEN,
+    METACLIP_PAD_TOKEN,
+    PIDINET_PAD_TOKEN,
+    SAM_PAD_TOKEN,
+    SD_PAD_TOKEN,
+    SIGLIP_PAD_TOKEN,
+    VISION_END_TOKEN,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +54,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning"))
+    parser.add_argument(
+        "--anchor-model-id",
+        default="[]",
+        help="Anchor model ids used by the adapter, for example: ['sam','dino'].",
+    )
+    parser.add_argument(
+        "--anchor-prompt-mode",
+        default="none",
+        choices=("none", "after_vision", "query_tail"),
+        help="Where to insert anchor tokens during generation.",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +106,103 @@ def prompt_for_query(query: str, mode: str) -> str:
         "Output only the bounding box in the format {<x1><y1><x2><y2>}."
     )
 
+
+
+ANCHOR_TOKEN_BY_ID = {
+    "sam": SAM_PAD_TOKEN,
+    "dino": DINO_PAD_TOKEN,
+    "depth": DEPTH_PAD_TOKEN,
+    "SD": SD_PAD_TOKEN,
+    "InternViT": INTERN_PAD_TOKEN,
+    "pidinet": PIDINET_PAD_TOKEN,
+    "siglip": SIGLIP_PAD_TOKEN,
+    "metaclip": METACLIP_PAD_TOKEN,
+}
+
+ANCHOR_COUNT_BY_ID = {
+    "sam": 8,
+    "dino": 4,
+    "depth": 4,
+    "SD": 4,
+    "InternViT": 4,
+    "pidinet": 4,
+    "siglip": 4,
+    "metaclip": 4,
+}
+
+
+def parse_anchor_model_ids(value: str | list[str] | None) -> list[str]:
+    if value is None or value == "" or value == "[]":
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    try:
+        parsed = ast.literal_eval(value)
+    except Exception:
+        parsed = [part.strip() for part in str(value).split(",") if part.strip()]
+    if isinstance(parsed, str):
+        parsed = [parsed]
+    return [str(item) for item in parsed]
+
+
+def build_anchor_prompt(anchor_model_ids: list[str]) -> str:
+    pads = []
+    for anchor_model_id in anchor_model_ids:
+        if anchor_model_id not in ANCHOR_TOKEN_BY_ID:
+            raise ValueError(f"Unsupported anchor model id: {anchor_model_id}")
+        token = ANCHOR_TOKEN_BY_ID[anchor_model_id]
+        count = ANCHOR_COUNT_BY_ID[anchor_model_id]
+        pads.append(ANCHOR_START_TOKEN + token * count + ANCHOR_END_TOKEN)
+    return "".join(pads)
+
+
+def insert_anchor_prompt(text: str, anchor_prompt: str, mode: str) -> str:
+    mode = (mode or "none").lower()
+    if not anchor_prompt or mode == "none":
+        return text
+    if mode == "after_vision":
+        if VISION_END_TOKEN in text:
+            return text.replace(VISION_END_TOKEN, VISION_END_TOKEN + anchor_prompt, 1)
+        mode = "query_tail"
+    if mode != "query_tail":
+        raise ValueError(f"Unsupported anchor_prompt_mode: {mode}")
+
+    assistant_marker = f"{DEFAULT_IM_START_TOKEN}assistant"
+    assistant_pos = text.rfind(assistant_marker)
+    search_end = assistant_pos if assistant_pos >= 0 else len(text)
+    user_end_pos = text.rfind(DEFAULT_IM_END_TOKEN, 0, search_end)
+    prefix_source = text[:user_end_pos] if user_end_pos >= 0 else text
+    anchor_prefix = "" if prefix_source.endswith("\n") else "\n"
+    anchor_text = anchor_prefix + "Visual anchors: " + anchor_prompt + "\n"
+    if user_end_pos >= 0:
+        return text[:user_end_pos] + anchor_text + text[user_end_pos:]
+    return text + anchor_text
+
+
+def tokenizer_single_id(tokenizer, token: str) -> int:
+    ids = tokenizer(token, add_special_tokens=False).input_ids
+    if len(ids) != 1:
+        raise ValueError(f"Token {token!r} is not a single tokenizer id: {ids}")
+    return ids[0]
+
+
+def validate_anchor_tokens(processor, anchor_model_ids: list[str]) -> list[int]:
+    required_tokens = [ANCHOR_START_TOKEN, ANCHOR_END_TOKEN]
+    required_tokens.extend(ANCHOR_TOKEN_BY_ID[item] for item in anchor_model_ids)
+    return [tokenizer_single_id(processor.tokenizer, token) for token in required_tokens]
+
+
+def anchor_token_indices(processor) -> list[int]:
+    return [
+        tokenizer_single_id(processor.tokenizer, SAM_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, DINO_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, DEPTH_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, SD_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, INTERN_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, PIDINET_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, SIGLIP_PAD_TOKEN),
+        tokenizer_single_id(processor.tokenizer, METACLIP_PAD_TOKEN),
+    ]
 
 def parse_bbox_text(text: str) -> list[float] | None:
     answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL | re.IGNORECASE)
@@ -139,6 +264,7 @@ def load_model(args: argparse.Namespace):
 
     dtype = resolve_dtype(args.torch_dtype, torch)
     device = resolve_device(args.device, torch)
+    anchor_model_ids = parse_anchor_model_ids(args.anchor_model_id)
     processor_candidates = []
     if args.adapter_path:
         adapter_path = Path(args.adapter_path)
@@ -159,6 +285,13 @@ def load_model(args: argparse.Namespace):
         torch_dtype=dtype,
         attn_implementation=args.attn_implementation,
     )
+    if anchor_model_ids:
+        validate_anchor_tokens(processor, anchor_model_ids)
+        if hasattr(model, "get_anchor_token_idx"):
+            model.get_anchor_token_idx(*anchor_token_indices(processor))
+    embedding_rows = model.get_input_embeddings().weight.shape[0]
+    if len(processor.tokenizer) > embedding_rows:
+        model.resize_token_embeddings(len(processor.tokenizer))
     if args.adapter_path:
         from peft import PeftModel
 
@@ -199,6 +332,9 @@ def generate_one(model, processor, device, image_path: str, query: str, args: ar
         }
     ]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    anchor_model_ids = parse_anchor_model_ids(args.anchor_model_id)
+    anchor_prompt = build_anchor_prompt(anchor_model_ids)
+    text = insert_anchor_prompt(text, anchor_prompt, args.anchor_prompt_mode)
     inputs = processor(text=[text], images=[image], return_tensors="pt")
     inputs = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in inputs.items()}
     with torch.no_grad():

@@ -11,7 +11,7 @@ class ModelArguments:
     anchor_model_id: str = field(default=None, metadata={"help": "List of anchor model ids"})
     anchor_loss_weight: str = field(default='[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]', metadata={"help": "List of anchor loss weights: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip"})
     anchor_tokens: str = field(default='[64, 64, 64, 64, 64, 64, 64, 64]', metadata={"help": "List of anchor tokens"})
-    
+
     # LLava specific parameters
     vision_tower: str = field(default=None, metadata={"help": "Vision tower"})
     pretrain_mm_mlp_adapter: str = field(default=None, metadata={"help": "Pretrain mm mlp adapter"})
@@ -21,7 +21,7 @@ class ModelArguments:
     mm_patch_merge_type: str = field(default=None, metadata={"help": "Mm patch merge type"})
     mm_use_im_patch_token: bool = field(default=False, metadata={"help": "Mm use im patch token"})
     mm_use_im_start_end: bool = field(default=False, metadata={"help": "Mm use im start end"})
-    
+
 
 @dataclass
 class TrainingArguments(TrainingArguments):
@@ -69,7 +69,7 @@ class TrainingArguments(TrainingArguments):
     lora_namespan_exclude: str = field(default=None, metadata={"help": "List of namespan to exclude for LoRA"})
     num_lora_modules: int = -1
     use_liger: bool = True
-    
+
     # Anchor Model New Parameters
     training_stage: str = field(default="full", metadata={"help": "Training stage, should be one of `start` or `full`."})
     projection_layer_lr: Optional[float] = None
@@ -90,9 +90,16 @@ class DataArguments:
     image_resized_width: int = field(default=None)
     image_resized_height: int = field(default=None)
     fps: float = 1.0
-    
+
     # Anchor Model New Parameters
     stage_0_step: int = field(default=0, metadata={"help": "Stage 0 step."})
     stage_1_step: int = field(default=2000, metadata={"help": "Stage 1 step."})
     stage_2_step: int = field(default=4000, metadata={"help": "Stage 2 step."})
-    
+    anchor_prompt_mode: str = field(
+        default="legacy",
+        metadata={"help": "Anchor token placement: legacy, none, after_vision, or query_tail."},
+    )
+    anchor_response_mode: str = field(
+        default="legacy",
+        metadata={"help": "Anchor text in assistant response: legacy, none/answer_only, or cot."},
+    )
