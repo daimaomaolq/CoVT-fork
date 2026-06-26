@@ -62,7 +62,7 @@ class TrainingArguments(TrainingArguments):
     lora_rank: int = 64
     lora_alpha: int = 16
     lora_dropout: float = 0.05
-    lora_weight_path: str = ""
+    lora_weight_path: str = field(default="", metadata={"help": "Optional PEFT adapter checkpoint used to warm-start LoRA training."})
     lora_bias: str = "none"
     vision_lr: Optional[float] = None
     merger_lr: Optional[float] = None

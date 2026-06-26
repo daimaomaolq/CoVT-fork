@@ -1,6 +1,6 @@
 import os
 import torch
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, HfArgumentParser
 from training.trainer import QwenTrainer, UnfreezeLoRACallback, ResumeDatasetCallback
@@ -29,6 +29,83 @@ torch.manual_seed(42)
 def rank0_print(*args):
     if local_rank == 0 or local_rank == '0' or local_rank is None:
         print(*args)
+
+def _load_tensor_file(path):
+    if path.suffix == ".safetensors":
+        from safetensors.torch import load_file
+        return load_file(str(path), device="cpu")
+    return torch.load(path, map_location="cpu")
+
+def _state_key_candidates(key):
+    candidates = [key]
+    prefix = "base_model.model."
+    if key.startswith(prefix):
+        candidates.append(key[len(prefix):])
+    else:
+        candidates.append(prefix + key)
+    return candidates
+
+def load_matching_state_dict(model, state_dict, source_name):
+    model_state = model.state_dict()
+    filtered = {}
+    skipped = []
+
+    for key, value in state_dict.items():
+        matched_key = None
+        for candidate in _state_key_candidates(key):
+            if candidate in model_state and tuple(model_state[candidate].shape) == tuple(value.shape):
+                matched_key = candidate
+                break
+        if matched_key is None:
+            shape = tuple(value.shape) if hasattr(value, "shape") else None
+            skipped.append((key, shape))
+            continue
+        filtered[matched_key] = value
+
+    incompatible = model.load_state_dict(filtered, strict=False)
+    rank0_print(
+        {
+            "status": "warmstart_non_lora_loaded",
+            "source": source_name,
+            "loaded": len(filtered),
+            "skipped": len(skipped),
+            "missing_after_load": len(incompatible.missing_keys),
+            "unexpected_after_load": len(incompatible.unexpected_keys),
+            "skipped_examples": skipped[:8],
+        }
+    )
+
+def load_non_lora_warmstart(model, adapter_path):
+    adapter_path = pathlib.Path(adapter_path).expanduser()
+    non_lora_path = adapter_path / "non_lora_state_dict.bin"
+    if not non_lora_path.exists():
+        rank0_print(
+            {
+                "status": "warmstart_non_lora_missing",
+                "path": str(non_lora_path),
+            }
+        )
+        return
+    state_dict = _load_tensor_file(non_lora_path)
+    load_matching_state_dict(model, state_dict, str(non_lora_path))
+
+def normalize_lora_namespan_exclude(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+        except (ValueError, SyntaxError):
+            pass
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return list(value)
 
 def find_target_linear_names(model, num_lora_modules=-1, lora_namespan_exclude=[], verbose=True):
     linear_cls = torch.nn.modules.Linear
@@ -245,23 +322,31 @@ def train():
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
 
     if training_args.lora_enable:
-        lora_namespan_exclude = training_args.lora_namespan_exclude
+        lora_namespan_exclude = normalize_lora_namespan_exclude(training_args.lora_namespan_exclude)
         if "llava" in model_args.model_id:
             lora_namespan_exclude += ['mm_projector', 'vision_tower', 'vision_resampler']
-        peft_config = LoraConfig(
-            r=training_args.lora_rank,
-            lora_alpha=training_args.lora_alpha,
-            target_modules=find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules),
-            lora_dropout=training_args.lora_dropout,
-            bias=training_args.lora_bias
-        )
         if training_args.bits == 16:
             if training_args.bf16:
                 model.to(torch.bfloat16)
             if training_args.fp16:
                 model.to(torch.float16)
-        rank0_print("Adding LoRA to the model...")
-        model = get_peft_model(model, peft_config)
+
+        if training_args.lora_weight_path:
+            warmstart_path = pathlib.Path(training_args.lora_weight_path).expanduser()
+            if not warmstart_path.exists():
+                raise FileNotFoundError(f"LoRA warm-start path does not exist: {warmstart_path}")
+            rank0_print({"status": "warmstart_lora_adapter", "path": str(warmstart_path)})
+            model = PeftModel.from_pretrained(model, str(warmstart_path), is_trainable=True)
+        else:
+            peft_config = LoraConfig(
+                r=training_args.lora_rank,
+                lora_alpha=training_args.lora_alpha,
+                target_modules=find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules),
+                lora_dropout=training_args.lora_dropout,
+                bias=training_args.lora_bias
+            )
+            rank0_print("Adding LoRA to the model...")
+            model = get_peft_model(model, peft_config)
         
         for name, param in model.named_parameters():
             if '_projection' in name:
@@ -271,7 +356,6 @@ def train():
             if '_query_vectors' in name:
                 param.requires_grad = True
         # model.print_trainable_parameters()
-
     processor = AutoProcessor.from_pretrained(model_args.model_id,
                                             # The default setting is padding_side="left"
                                             # When training using the right-side padding is more efficient.
@@ -316,6 +400,8 @@ def train():
     new_len = len(processor.tokenizer)
     
     model.get_anchor_token_idx(sam_token_idx, dino_token_idx, depth_token_idx, sd_token_idx, intern_token_idx, pidinet_token_idx, siglip_token_idx, metaclip_token_idx)
+    if training_args.lora_enable and training_args.lora_weight_path:
+        load_non_lora_warmstart(model, training_args.lora_weight_path)
     
     if "llava" in model_args.model_id:
         configure_llava_vision_tower(model_to_configure, model_args, training_args, compute_dtype, processor)
