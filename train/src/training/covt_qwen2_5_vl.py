@@ -210,7 +210,9 @@ def hungarian_matching(cost):
 
 class AnchorLoss():
     def __init__(self, anchor_loss_weight):
-        self.anchor_loss_weight = anchor_loss_weight
+        if len(anchor_loss_weight) != 8:
+            raise ValueError("anchor_loss_weight must have 8 values: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip")
+        self.anchor_loss_weight = [float(value) for value in anchor_loss_weight]
         (
             self.sam_loss_weight, 
             self.dino_loss_weight, 
@@ -220,16 +222,7 @@ class AnchorLoss():
             self.pidinet_loss_weight,
             self.siglip_loss_weight,
             self.metaclip_loss_weight,
-        ) = (
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-        )
+        ) = self.anchor_loss_weight
         self.loss_fn = nn.MSELoss()
         
     def get_sam_feature_align_loss(self, sam_embed, gt_embed):
