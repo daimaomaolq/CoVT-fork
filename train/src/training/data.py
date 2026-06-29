@@ -1,3 +1,4 @@
+import ast
 import copy
 import os
 from dataclasses import dataclass, field
@@ -343,27 +344,38 @@ def replace_pad_with_anchor_tokens(gpt_response):
         gpt_response = gpt_response.replace(token, anchor_token)
     return gpt_response
     
-def get_token_num(anchor_model_id):
-    token_nums = []
-    for anchor_model in anchor_model_id:
-        if anchor_model == "sam":
-            token_nums.append(8)
-        elif anchor_model == "dino":
-            token_nums.append(4)
-        elif anchor_model == "depth":
-            token_nums.append(4)
-        elif anchor_model == "SD":
-            token_nums.append(4)
-        elif anchor_model == "InternViT":
-            token_nums.append(4)
-        elif anchor_model == "pidinet":
-            token_nums.append(4)
-        elif anchor_model == "siglip":
-            token_nums.append(4)
-        elif anchor_model == "metaclip":
-            token_nums.append(4)
-    return token_nums
+CANONICAL_ANCHOR_ORDER = ["sam", "dino", "depth", "SD", "InternViT", "pidinet", "siglip", "metaclip"]
+DEFAULT_ANCHOR_TOKEN_COUNTS = {
+    "sam": 8,
+    "dino": 4,
+    "depth": 4,
+    "SD": 4,
+    "InternViT": 4,
+    "pidinet": 4,
+    "siglip": 4,
+    "metaclip": 4,
+}
 
+
+def parse_anchor_token_counts(anchor_model_id, raw_counts=None):
+    if raw_counts is None or raw_counts == "":
+        return [DEFAULT_ANCHOR_TOKEN_COUNTS[anchor_model] for anchor_model in anchor_model_id]
+    if isinstance(raw_counts, str):
+        raw_counts = ast.literal_eval(raw_counts)
+    counts = [int(value) for value in raw_counts]
+    if len(counts) == len(CANONICAL_ANCHOR_ORDER):
+        count_by_id = dict(zip(CANONICAL_ANCHOR_ORDER, counts))
+        return [count_by_id[anchor_model] for anchor_model in anchor_model_id]
+    if len(counts) == len(anchor_model_id):
+        return counts
+    raise ValueError(
+        "anchor_token_counts must contain either 8 canonical values "
+        "or one value per selected anchor model"
+    )
+
+
+def get_token_num(anchor_model_id, raw_counts=None):
+    return parse_anchor_token_counts(anchor_model_id, raw_counts)
 def get_anchor_token(anchor_model_id):
     anchor_tokens = []
     for anchor_model in anchor_model_id:
@@ -440,7 +452,7 @@ class SupervisedDataset(Dataset):
         self.video_max_pixel = data_args.video_max_pixels
         self.fps = data_args.fps
         self.anchor_model_id = anchor_model_id
-        self.anchor_token_nums = get_token_num(anchor_model_id)
+        self.anchor_token_nums = get_token_num(anchor_model_id, getattr(data_args, "anchor_token_counts", None))
         self.anchor_tokens = get_anchor_token(anchor_model_id)
         self.anchor_task_names = get_anchor_task_name(anchor_model_id)
         

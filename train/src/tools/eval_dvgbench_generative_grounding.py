@@ -65,6 +65,16 @@ def parse_args() -> argparse.Namespace:
         choices=("none", "after_vision", "query_tail"),
         help="Where to insert anchor tokens during generation.",
     )
+    parser.add_argument(
+        "--anchor-token-counts",
+        "--anchor_token_counts",
+        dest="anchor_token_counts",
+        default=None,
+        help=(
+            "Optional anchor token counts. Either 8 values in canonical order "
+            "sam,dino,depth,SD,InternViT,pidinet,siglip,metaclip or one value per selected anchor."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -119,6 +129,8 @@ ANCHOR_TOKEN_BY_ID = {
     "metaclip": METACLIP_PAD_TOKEN,
 }
 
+CANONICAL_ANCHOR_ORDER = ["sam", "dino", "depth", "SD", "InternViT", "pidinet", "siglip", "metaclip"]
+
 ANCHOR_COUNT_BY_ID = {
     "sam": 8,
     "dino": 4,
@@ -145,14 +157,32 @@ def parse_anchor_model_ids(value: str | list[str] | None) -> list[str]:
     return [str(item) for item in parsed]
 
 
-def build_anchor_prompt(anchor_model_ids: list[str]) -> str:
+def parse_anchor_token_counts(anchor_model_ids: list[str], raw_counts: str | list[int] | None) -> list[int]:
+    if raw_counts is None or raw_counts == "":
+        return [ANCHOR_COUNT_BY_ID[anchor_model_id] for anchor_model_id in anchor_model_ids]
+    if isinstance(raw_counts, str):
+        raw_counts = ast.literal_eval(raw_counts)
+    counts = [int(value) for value in raw_counts]
+    if len(counts) == len(CANONICAL_ANCHOR_ORDER):
+        count_by_id = dict(zip(CANONICAL_ANCHOR_ORDER, counts))
+        return [count_by_id[anchor_model_id] for anchor_model_id in anchor_model_ids]
+    if len(counts) == len(anchor_model_ids):
+        return counts
+    raise ValueError(
+        "anchor_token_counts must contain either 8 canonical values "
+        "or one value per selected anchor model"
+    )
+
+
+def build_anchor_prompt(anchor_model_ids: list[str], anchor_token_counts: list[int] | None = None) -> str:
+    if anchor_token_counts is None:
+        anchor_token_counts = parse_anchor_token_counts(anchor_model_ids, None)
     pads = []
-    for anchor_model_id in anchor_model_ids:
+    for anchor_model_id, count in zip(anchor_model_ids, anchor_token_counts):
         if anchor_model_id not in ANCHOR_TOKEN_BY_ID:
             raise ValueError(f"Unsupported anchor model id: {anchor_model_id}")
         token = ANCHOR_TOKEN_BY_ID[anchor_model_id]
-        count = ANCHOR_COUNT_BY_ID[anchor_model_id]
-        pads.append(ANCHOR_START_TOKEN + token * count + ANCHOR_END_TOKEN)
+        pads.append(ANCHOR_START_TOKEN + token * int(count) + ANCHOR_END_TOKEN)
     return "".join(pads)
 
 
@@ -333,7 +363,8 @@ def generate_one(model, processor, device, image_path: str, query: str, args: ar
     ]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     anchor_model_ids = parse_anchor_model_ids(args.anchor_model_id)
-    anchor_prompt = build_anchor_prompt(anchor_model_ids)
+    anchor_token_counts = parse_anchor_token_counts(anchor_model_ids, args.anchor_token_counts)
+    anchor_prompt = build_anchor_prompt(anchor_model_ids, anchor_token_counts)
     text = insert_anchor_prompt(text, anchor_prompt, args.anchor_prompt_mode)
     inputs = processor(text=[text], images=[image], return_tensors="pt")
     inputs = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in inputs.items()}

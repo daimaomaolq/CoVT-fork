@@ -103,3 +103,12 @@ class DataArguments:
         default="legacy",
         metadata={"help": "Anchor text in assistant response: legacy, none/answer_only, or cot."},
     )
+    anchor_token_counts: str = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional anchor token counts. Either 8 values in canonical order "
+                "sam,dino,depth,SD,InternViT,pidinet,siglip,metaclip or one value per selected anchor."
+            )
+        },
+    )
