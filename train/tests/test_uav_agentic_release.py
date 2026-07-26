@@ -70,6 +70,8 @@ class ReleaseAuditTests(unittest.TestCase):
         source = inspect.getsource(CoVTGrounder.load)
         self.assertIn("CoVTForConditionalGeneration", source)
         self.assertNotIn("Qwen2_5_VLForConditionalGeneration", source)
+        self.assertIn("Path(__file__).resolve().parents[3]", source)
+        self.assertIn("sys.path.insert", source)
 
     def test_formal_cache_requires_measured_token_confidence(self):
         with tempfile.TemporaryDirectory() as directory:

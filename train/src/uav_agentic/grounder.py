@@ -5,6 +5,7 @@ import json
 import math
 import re
 import time
+import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -225,6 +226,10 @@ class CoVTGrounder:
     def load(cls, settings: GrounderSettings) -> "CoVTGrounder":
         import torch
         from transformers import AutoProcessor
+
+        repo_root = Path(__file__).resolve().parents[3]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
 
         from training.covt_qwen2_5_vl import CoVTForConditionalGeneration
 
