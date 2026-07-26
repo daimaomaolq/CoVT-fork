@@ -25,10 +25,6 @@ COLUMNS = [
     "Search Yield@DeltaIoU0.1",
     "Mean Hypothesis Count",
     "Root Verification Rate",
-    "Initial Hypothesis Verification Rate",
-    "Verification Advantage Rate",
-    "Relocation Rate",
-    "Relocation Recovery Precision",
     "Avg Calls",
     "Avg Specialized Unit Calls",
     "Initial Latency_ms",
@@ -105,14 +101,6 @@ def flatten(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
         "Search Yield@DeltaIoU0.1": candidates.get("Search Yield@DeltaIoU0.1"),
         "Mean Hypothesis Count": candidates.get("Mean Hypothesis Count"),
         "Root Verification Rate": candidates.get("Root Verification Rate"),
-        "Initial Hypothesis Verification Rate": candidates.get(
-            "Initial Hypothesis Verification Rate"
-        ),
-        "Verification Advantage Rate": candidates.get("Verification Advantage Rate"),
-        "Relocation Rate": candidates.get("Relocation Rate"),
-        "Relocation Recovery Precision": candidates.get(
-            "Relocation Recovery Precision"
-        ),
         "Avg Calls": agentic.get("Avg Calls"),
         "Avg Specialized Unit Calls": agentic.get(
             "Avg Specialized Unit Calls", agentic.get("Avg Child Calls")

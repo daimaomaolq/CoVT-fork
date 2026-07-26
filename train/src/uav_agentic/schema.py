@@ -140,7 +140,7 @@ class EscalationFeedback:
 @dataclass
 class AgenticConfig:
     method: Method = Method.HIERARCHICAL
-    max_child_perception_calls: int = 5
+    max_child_perception_calls: int = 2
     confidence_threshold: float = 0.42
     shape_threshold: float = 0.45
     small_area_threshold: float = 0.003
@@ -152,8 +152,8 @@ class AgenticConfig:
     competition_margin_threshold: float = 0.12
     final_confidence_threshold: float = 0.48
     information_gain_threshold: float = 0.02
-    zoom_scales: tuple[float, ...] = (3.0, 6.0)
-    zoom_min_crop_size: float = 0.25
+    zoom_scales: tuple[float, ...] = (2.5, 4.0)
+    zoom_min_crop_size: float = 0.16
     zoom_identity_iou_threshold: float = 0.05
     zoom_center_distance_threshold: float = 0.20
     zoom_relation_drop_tolerance: float = 0.15
@@ -166,8 +166,6 @@ class AgenticConfig:
     max_target_tile_calls: int = 2
     verification_confidence_threshold: float = 0.35
     verification_max_crop_area: float = 0.90
-    verification_advantage_margin: float = 0.05
-    enable_symmetric_verification: bool = True
     disabled_agents: set[str] = field(default_factory=set)
     feedback_mode: str = "template"
     enable_escalation: bool = True
@@ -216,7 +214,6 @@ class AgenticConfig:
                 self.verification_confidence_threshold
             ),
             "verification_max_crop_area": self.verification_max_crop_area,
-            "verification_advantage_margin": self.verification_advantage_margin,
             "false_repair_margin": self.false_repair_margin,
             "replacement_identity_iou_threshold": (
                 self.replacement_identity_iou_threshold

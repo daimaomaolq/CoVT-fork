@@ -170,36 +170,10 @@ def rank_candidates(
         target_evidence = stability if cross_view_supported else 0.5
         for candidate in members:
             candidate.target_consistency = target_evidence
-            candidate.observation_agreement = stability if independent_children else 0.0
+            candidate.observation_agreement = stability if accepted_children else 0.0
             candidate.fused_score = _candidate_score(candidate, config)
         eligible = [root, *accepted_children]
-        # Verification must score a hypothesis symmetrically rather than grant a
-        # one-sided bonus to whichever root happened to receive a Zoom call.
-        consensus_members = [root, *supporting_children]
-        consensus_score = sum(
-            candidate.fused_score for candidate in consensus_members
-        ) / len(consensus_members)
-        representative = (
-            root
-            if root.source_agent == "BaseGrounder"
-            else max(eligible, key=lambda item: item.fused_score)
-        )
-        representative.fused_score = consensus_score
-        verification_strength = (
-            stability
-            * min(
-                root.bbox_token_confidence,
-                max(
-                    (
-                        candidate.bbox_token_confidence
-                        for candidate in supporting_children
-                    ),
-                    default=0.0,
-                ),
-            )
-            if cross_view_supported
-            else 0.0
-        )
+        representative = max(eligible, key=lambda item: item.fused_score)
         representatives.append(representative)
         hypotheses.append(
             {
@@ -215,7 +189,6 @@ def rank_candidates(
                 ],
                 "cross_view_iou": stability,
                 "cross_view_supported": cross_view_supported,
-                "verification_strength": verification_strength,
                 "independent_verification_ids": [
                     item.candidate_id for item in independent_children
                 ],

@@ -165,7 +165,7 @@ class ReleaseAuditTests(unittest.TestCase):
         )
         self.assertAlmostEqual(guarded.evidence["comparable_initial_score"], 0.50)
 
-    def test_false_repair_guard_accepts_verification_advantage(self):
+    def test_false_repair_guard_accepts_independent_zoom_confirmation(self):
         initial = make_candidate("c00", bbox=[0.39, 0.39, 0.59, 0.59], confidence=0.55)
         initial.fused_score = 0.50
         refined = make_candidate("c01", [0.4, 0.4, 0.6, 0.6], confidence=0.45)
@@ -185,25 +185,7 @@ class ReleaseAuditTests(unittest.TestCase):
             parent_candidate_id="c01",
         )
         zoom.fused_score = 0.60
-        fusion = FusionResult(
-            [refined, zoom, initial],
-            refined,
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "c00",
-                        "cross_view_supported": True,
-                        "verification_strength": 0.10,
-                    },
-                    {
-                        "hypothesis_id": "c01",
-                        "cross_view_supported": True,
-                        "verification_strength": 0.30,
-                        "supporting_verification_ids": ["c02"],
-                    },
-                ]
-            },
-        )
+        fusion = FusionResult([refined, zoom, initial], refined, {})
         guarded = _apply_false_repair_guard(
             fusion,
             initial,
@@ -216,44 +198,6 @@ class ReleaseAuditTests(unittest.TestCase):
             guarded.evidence["replacement_support_evidence"],
         )
         self.assertEqual(guarded.evidence["cross_view_partner_id"], "c02")
-        self.assertTrue(guarded.evidence["verification_advantage"])
-        self.assertIn(
-            "cross_view_verification_advantage",
-            guarded.evidence["replacement_support_evidence"],
-        )
-
-    def test_false_repair_guard_rejects_one_sided_self_confirmation(self):
-        initial = make_candidate("c00", bbox=[0.10, 0.10, 0.20, 0.20], confidence=0.55)
-        initial.fused_score = 0.50
-        switched = make_candidate("c01", [0.70, 0.70, 0.80, 0.80], confidence=0.55)
-        switched.fused_score = 0.70
-        fusion = FusionResult(
-            [switched, initial],
-            switched,
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "c00",
-                        "cross_view_supported": True,
-                        "verification_strength": 0.25,
-                    },
-                    {
-                        "hypothesis_id": "c01",
-                        "cross_view_supported": True,
-                        "verification_strength": 0.25,
-                        "supporting_verification_ids": ["c02"],
-                    },
-                ]
-            },
-        )
-        guarded = _apply_false_repair_guard(
-            fusion,
-            initial,
-            0.50,
-            AgenticConfig(),
-        )
-        self.assertEqual(guarded.final.candidate_id, "c00")
-        self.assertFalse(guarded.evidence["verification_advantage"])
 
     def test_false_repair_guard_rejects_identity_switch(self):
         initial = make_candidate("c00", confidence=0.40)
