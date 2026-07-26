@@ -21,10 +21,15 @@ def attach_evaluation(
     initial_iou = box_iou(initial_box, gt)
     final_iou = box_iou(final_box, gt)
 
+    generated_candidates = [
+        item
+        for item in inference.get("target_candidates", [])
+        if item.get("bbox") is not None
+    ]
     candidates = {
         item["candidate_id"]: item
-        for item in inference.get("target_candidates", [])
-        if item.get("bbox") is not None and item.get("accepted_by_guard", True)
+        for item in generated_candidates
+        if item.get("accepted_by_guard", True)
     }
     ranked_ids = (
         inference.get("verification_evidence", {})
@@ -35,7 +40,41 @@ def attach_evaluation(
     if not ranked:
         ranked = list(candidates.values())
     candidate_ious = [box_iou(item.get("bbox"), gt) for item in ranked]
-    oracle_iou = max(candidate_ious, default=0.0)
+    oracle_iou = max(
+        (box_iou(item.get("bbox"), gt) for item in generated_candidates),
+        default=0.0,
+    )
+    initial_id = inference["initial_candidate"].get("candidate_id", "c00")
+    alternative_candidates = [
+        item
+        for item in generated_candidates
+        if (
+            item.get("hypothesis_id")
+            or item.get("parent_candidate_id")
+            or item["candidate_id"]
+        )
+        != initial_id
+    ]
+    alternative_ious = [
+        box_iou(item.get("bbox"), gt) for item in alternative_candidates
+    ]
+    alternative_oracle_iou = max(alternative_ious, default=0.0)
+    diversity_values = [
+        1.0 - box_iou(item.get("bbox"), initial_box) for item in alternative_candidates
+    ]
+    final_item = next(
+        (
+            item
+            for item in generated_candidates
+            if item.get("candidate_id") == inference.get("final_candidate_id")
+        ),
+        {},
+    )
+    final_hypothesis_id = (
+        final_item.get("hypothesis_id")
+        or final_item.get("parent_candidate_id")
+        or final_item.get("candidate_id")
+    )
     candidate_recall = {
         f"CandidateRecall@{k}": float(
             any(iou >= IOU_THRESHOLD for iou in candidate_ious[:k])
@@ -53,6 +92,20 @@ def attach_evaluation(
         "candidate_ious_ranked": candidate_ious,
         "candidate_oracle_iou": oracle_iou,
         "oracle_gap_iou": max(0.0, oracle_iou - final_iou),
+        "alternative_candidate_oracle_iou": alternative_oracle_iou,
+        "alternative_candidate_hit_at_0_5": float(
+            initial_iou < IOU_THRESHOLD <= alternative_oracle_iou
+        ),
+        "alternative_selected_at_0_5": float(
+            initial_iou < IOU_THRESHOLD <= final_iou
+            and final_hypothesis_id != initial_id
+        ),
+        "search_yield_at_delta_iou_0_1": float(oracle_iou - initial_iou >= 0.10),
+        "generated_candidate_count": len(generated_candidates),
+        "hypothesis_count": inference.get("verification_evidence", {})
+        .get("fusion", {})
+        .get("hypothesis_count", len(ranked)),
+        "candidate_diversity": _mean(diversity_values),
         **candidate_recall,
     }
     return inference_result
@@ -292,6 +345,28 @@ def summarize(
         int(float(row["evaluation"]["candidate_oracle_iou"]) >= IOU_THRESHOLD)
         for row in rows
     ]
+    alternative_hits = sum(
+        int(row["evaluation"].get("alternative_candidate_hit_at_0_5", 0))
+        for row in rows
+    )
+    search_yields = sum(
+        int(row["evaluation"].get("search_yield_at_delta_iou_0_1", 0))
+        for row in rows
+        if not row["evaluation"]["initial_correct_at_0_5"]
+    )
+    verified_hypotheses = sum(
+        sum(
+            bool(item.get("cross_view_supported"))
+            for item in row["inference"]
+            .get("verification_evidence", {})
+            .get("fusion", {})
+            .get("hypotheses", [])
+        )
+        for row in rows
+    )
+    total_hypotheses = sum(
+        int(row["evaluation"].get("hypothesis_count", 0)) for row in rows
+    )
     feedback_rows = [
         row for row in rows if row["inference"].get("human_feedback") is not None
     ]
@@ -367,6 +442,31 @@ def summarize(
                 [float(row["evaluation"]["CandidateRecall@3"]) for row in rows]
             ),
             "Candidate Oracle Acc@0.5": _mean(oracle_hits),
+            "Alternative Candidate Recall@0.5": _safe_ratio(
+                alternative_hits, initial_failure_count
+            ),
+            "Alternative Selection Success": _safe_ratio(recovered, alternative_hits),
+            "Search Yield@DeltaIoU0.1": _safe_ratio(
+                search_yields, initial_failure_count
+            ),
+            "Mean Generated Candidate Count": _mean(
+                [
+                    float(row["evaluation"].get("generated_candidate_count", 0))
+                    for row in rows
+                ]
+            ),
+            "Mean Hypothesis Count": _mean(
+                [float(row["evaluation"].get("hypothesis_count", 0)) for row in rows]
+            ),
+            "Mean Candidate Diversity": _mean(
+                [
+                    float(row["evaluation"].get("candidate_diversity", 0.0))
+                    for row in rows
+                ]
+            ),
+            "Root Verification Rate": _safe_ratio(
+                verified_hypotheses, total_hypotheses
+            ),
             "Selection Success Given Oracle Hit": _safe_ratio(
                 sum(final and oracle for final, oracle in zip(final_hits, oracle_hits)),
                 sum(oracle_hits),

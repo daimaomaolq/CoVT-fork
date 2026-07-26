@@ -20,6 +20,11 @@ COLUMNS = [
     "False Repair Rate",
     "Failure Detection Recall",
     "CandidateRecall@2",
+    "Alternative Candidate Recall@0.5",
+    "Alternative Selection Success",
+    "Search Yield@DeltaIoU0.1",
+    "Mean Hypothesis Count",
+    "Root Verification Rate",
     "Avg Calls",
     "Avg Specialized Unit Calls",
     "Initial Latency_ms",
@@ -87,6 +92,15 @@ def flatten(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
         "False Repair Rate": agentic.get("False Repair Rate"),
         "Failure Detection Recall": detection.get("Recall"),
         "CandidateRecall@2": candidates.get("CandidateRecall@2"),
+        "Alternative Candidate Recall@0.5": candidates.get(
+            "Alternative Candidate Recall@0.5"
+        ),
+        "Alternative Selection Success": candidates.get(
+            "Alternative Selection Success"
+        ),
+        "Search Yield@DeltaIoU0.1": candidates.get("Search Yield@DeltaIoU0.1"),
+        "Mean Hypothesis Count": candidates.get("Mean Hypothesis Count"),
+        "Root Verification Rate": candidates.get("Root Verification Rate"),
         "Avg Calls": agentic.get("Avg Calls"),
         "Avg Specialized Unit Calls": agentic.get(
             "Avg Specialized Unit Calls", agentic.get("Avg Child Calls")

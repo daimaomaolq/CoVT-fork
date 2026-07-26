@@ -26,7 +26,7 @@ from .schema import (
 )
 
 
-SCHEMA_VERSION = "dai-uav-agent-v3.1"
+SCHEMA_VERSION = "dai-uav-agent-v4.0"
 
 
 def _safe_fusion(
@@ -78,34 +78,38 @@ def _apply_false_repair_guard(
     ):
         evidence.append("strong_token_confidence_gain")
 
-    by_id = {candidate.candidate_id: candidate for candidate in fusion.ranked}
-    cross_view_partner_id: str | None = None
-    if selected.source_agent == "TargetAgent":
-        for candidate in fusion.ranked:
-            if (
-                candidate.source_agent == "ZoomAgent"
-                and candidate.parent_candidate_id == selected.candidate_id
-                and candidate.bbox is not None
-                and selected.bbox is not None
-                and box_iou(candidate.bbox, selected.bbox)
-                >= config.replacement_cross_view_iou_threshold
-                and candidate.bbox_token_confidence >= selected.bbox_token_confidence
-            ):
-                cross_view_partner_id = candidate.candidate_id
-                break
-    elif selected.source_agent == "ZoomAgent" and selected.parent_candidate_id:
-        parent = by_id.get(selected.parent_candidate_id)
-        if (
-            parent is not None
-            and parent.source_agent == "TargetAgent"
-            and parent.bbox is not None
+    selected_hypothesis_id = (
+        selected.hypothesis_id or selected.parent_candidate_id or selected.candidate_id
+    )
+    selected_hypothesis = next(
+        (
+            item
+            for item in fusion.evidence.get("hypotheses", [])
+            if item.get("hypothesis_id") == selected_hypothesis_id
+        ),
+        {},
+    )
+    supporting_verification_ids = selected_hypothesis.get(
+        "supporting_verification_ids", []
+    )
+    if not supporting_verification_ids:
+        supporting_verification_ids = [
+            candidate.candidate_id
+            for candidate in fusion.ranked
+            if candidate.source_agent == "ZoomAgent"
+            and (candidate.hypothesis_id or candidate.parent_candidate_id)
+            == selected_hypothesis_id
+            and candidate.bbox is not None
             and selected.bbox is not None
-            and box_iou(parent.bbox, selected.bbox)
+            and box_iou(candidate.bbox, selected.bbox)
             >= config.replacement_cross_view_iou_threshold
-            and selected.bbox_token_confidence >= parent.bbox_token_confidence
-        ):
-            cross_view_partner_id = parent.candidate_id
-    if cross_view_partner_id is not None:
+            and candidate.bbox_token_confidence
+            >= config.verification_confidence_threshold
+        ]
+    cross_view_partner_id = (
+        supporting_verification_ids[0] if supporting_verification_ids else None
+    )
+    if selected_hypothesis.get("cross_view_supported") or cross_view_partner_id:
         evidence.append("cross_view_zoom_confirmation")
 
     relation_gain = selected.relation_consistency - initial.relation_consistency
@@ -127,6 +131,7 @@ def _apply_false_repair_guard(
     fusion.evidence.update(
         {
             "pre_guard_final_candidate_id": selected.candidate_id,
+            "pre_guard_final_hypothesis_id": selected_hypothesis_id,
             "pre_perception_initial_score": initial_score,
             "comparable_initial_score": comparable_initial_score,
             "pre_guard_score_improvement": score_improvement,
@@ -154,8 +159,21 @@ def _apply_false_repair_guard(
         next_score = ranked[1].fused_score if len(ranked) > 1 else 0.0
         initial.competition_margin = max(0.0, comparable_initial_score - next_score)
         fusion.evidence["top_score"] = comparable_initial_score
+        fusion.evidence["top_hypothesis_id"] = initial.candidate_id
         fusion.evidence["top_margin"] = initial.competition_margin
         fusion.evidence["ranked_candidate_ids"] = [item.candidate_id for item in ranked]
+        fusion.evidence["ranked_hypothesis_ids"] = [
+            item.hypothesis_id or item.parent_candidate_id or item.candidate_id
+            for item in ranked
+        ]
+        fusion.evidence["selected_hypothesis"] = next(
+            (
+                item
+                for item in fusion.evidence.get("hypotheses", [])
+                if item.get("hypothesis_id") == initial.candidate_id
+            ),
+            {},
+        )
         fusion.evidence["false_repair_guard_applied"] = True
         fusion.evidence["false_repair_guard_reason"] = (
             "missing_independent_replacement_evidence"
@@ -475,11 +493,23 @@ class HierarchicalParentAgent:
                 calls.append(call)
             fusion = _safe_fusion(candidates, graph, self.config)
         else:
-            # Specialized perception dependencies are executed before relation reasoning.
-            for action in [
-                item for item in routing.perception_actions if item != "zoom"
-            ]:
-                agent_context = AgentContext(
+            budget = self.config.max_child_perception_calls
+            specialized_perception_agents = {
+                "TargetAgent",
+                "ContextAgent",
+                "ZoomAgent",
+            }
+
+            def budget_used() -> int:
+                return sum(
+                    call.model_call
+                    and call.perception_call
+                    and call.agent in specialized_perception_agents
+                    for call in calls
+                )
+
+            def make_context() -> AgentContext:
+                return AgentContext(
                     image=image,
                     graph=graph,
                     grounder=self.grounder,
@@ -487,82 +517,176 @@ class HierarchicalParentAgent:
                     target_candidates=candidates,
                     context_candidates=context_candidates,
                 )
-                if action == "target":
-                    result = self.target_agent.run(
-                        agent_context, self._next_candidate_id(candidates)
-                    )
-                    candidates.extend(result.candidates)
-                elif action == "context":
-                    context_id = f"x{len(context_candidates):02d}"
-                    result = self.context_agent.run(agent_context, context_id)
-                    context_candidates.extend(result.candidates)
-                else:
-                    continue
-                attempted.add(action)
+
+            def append_target_result(result) -> None:
+                existing_roots = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.parent_candidate_id is None
+                    and candidate.bbox is not None
+                ]
+                for candidate in result.candidates:
+                    if candidate.bbox is not None and any(
+                        box_iou(candidate.bbox, existing.bbox) >= 0.995
+                        for existing in existing_roots
+                    ):
+                        candidate.accepted_by_guard = False
+                        candidate.rejection_reasons.append("duplicate_hypothesis")
+                    candidates.append(candidate)
                 calls.append(result.call)
+                attempted.add("target")
 
-            relation_context = AgentContext(
-                image=image,
-                graph=graph,
-                grounder=self.grounder,
-                config=self.config,
-                target_candidates=candidates,
-                context_candidates=context_candidates,
-            )
-            if routing.run_relation_reasoner:
-                relation_evidence = self._relation_call(relation_context, calls)
-                attempted.add("relation")
-            preliminary_fusion = _safe_fusion(candidates, graph, self.config)
+            def refresh_relation_and_fusion() -> FusionResult:
+                nonlocal relation_evidence
+                if routing.run_relation_reasoner:
+                    relation_evidence = self._relation_call(make_context(), calls)
+                    attempted.add("relation")
+                return _safe_fusion(candidates, graph, self.config)
 
-            if "zoom" in routing.perception_actions:
-                stable_identity = (
-                    len(preliminary_fusion.ranked) == 1
-                    or preliminary_fusion.final.competition_margin
-                    >= self.config.competition_margin_threshold
+            def best_diverse_target() -> Candidate | None:
+                alternatives = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.source_agent == "TargetAgent"
+                    and candidate.parent_candidate_id is None
+                    and candidate.bbox is not None
+                    and candidate.accepted_by_guard
+                    and (
+                        initial.bbox is None
+                        or box_iou(candidate.bbox, initial.bbox)
+                        < self.config.target_diversity_iou_threshold
+                    )
+                ]
+                return (
+                    max(alternatives, key=lambda item: item.fused_score)
+                    if alternatives
+                    else None
                 )
-                if stable_identity and preliminary_fusion.final.bbox is not None:
-                    zoom_context = AgentContext(
-                        image=image,
-                        graph=graph,
-                        grounder=self.grounder,
-                        config=self.config,
-                        target_candidates=candidates,
-                        context_candidates=context_candidates,
-                    )
-                    result = self.zoom_agent.run(
-                        zoom_context,
-                        preliminary_fusion.final,
+
+            planned_actions = set(routing.perception_actions)
+            if (
+                "target" in planned_actions
+                and budget_used() < budget
+                and "target" not in self.config.disabled_agents
+            ):
+                result = self.target_agent.run(
+                    make_context(), self._next_candidate_id(candidates)
+                )
+                append_target_result(result)
+
+            if (
+                "context" in planned_actions
+                and budget_used() < budget
+                and "context" not in self.config.disabled_agents
+            ):
+                context_id = f"x{len(context_candidates):02d}"
+                result = self.context_agent.run(make_context(), context_id)
+                context_candidates.extend(result.candidates)
+                calls.append(result.call)
+                attempted.add("context")
+
+            preliminary_fusion = refresh_relation_and_fusion()
+            alternative = best_diverse_target()
+            search_risk = (
+                bool(routing.preliminary_suspicions) or graph.is_position_sensitive
+            )
+            tile_search_performed = False
+
+            # A separated target hypothesis is verified directly. If the full-image
+            # probe only repeats the initial box, spend the remaining budget on unseen
+            # transformed observation tiles and verify the first diverse hypothesis.
+            if (
+                alternative is not None
+                and budget_used() < budget
+                and "zoom" not in self.config.disabled_agents
+            ):
+                result = self.zoom_agent.run(
+                    make_context(),
+                    alternative,
+                    self._next_candidate_id(candidates),
+                )
+                candidates.extend(result.candidates)
+                calls.append(result.call)
+                attempted.add("zoom")
+                preliminary_fusion = refresh_relation_and_fusion()
+            elif (
+                search_risk
+                and budget_used() < budget
+                and "target" not in self.config.disabled_agents
+            ):
+                remaining = min(
+                    budget - budget_used(), self.config.max_target_tile_calls
+                )
+                regions = self.target_agent.proposal_regions(
+                    make_context(), initial, remaining
+                )
+                tile_search_performed = True
+                for region in regions:
+                    if budget_used() >= budget:
+                        break
+                    result = self.target_agent.run_transformed_view(
+                        make_context(),
                         self._next_candidate_id(candidates),
+                        region,
                     )
-                    candidates.extend(result.candidates)
-                    calls.append(result.call)
-                    attempted.add("zoom")
-                    if routing.run_relation_reasoner:
-                        final_relation_context = AgentContext(
-                            image=image,
-                            graph=graph,
-                            grounder=self.grounder,
-                            config=self.config,
-                            target_candidates=candidates,
-                            context_candidates=context_candidates,
+                    append_target_result(result)
+                    preliminary_fusion = refresh_relation_and_fusion()
+                    alternative = best_diverse_target()
+                    if (
+                        alternative is not None
+                        and budget_used() < budget
+                        and "zoom" not in self.config.disabled_agents
+                    ):
+                        result = self.zoom_agent.run(
+                            make_context(),
+                            alternative,
+                            self._next_candidate_id(candidates),
                         )
-                        relation_evidence = self._relation_call(
-                            final_relation_context, calls
-                        )
-                else:
-                    calls.append(
-                        AgentCall(
-                            call_id="call_zoom_skipped",
-                            agent="ZoomAgent",
-                            action="semantic_frame_preserving_zoom",
-                            input={
-                                "seed_candidate_id": preliminary_fusion.final.candidate_id,
-                            },
-                            output={"candidate": None},
-                            evidence={"skipped_reason": "target_identity_not_stable"},
-                            status="skipped",
-                        )
+                        candidates.extend(result.candidates)
+                        calls.append(result.call)
+                        attempted.add("zoom")
+                        preliminary_fusion = refresh_relation_and_fusion()
+                        break
+            elif (
+                "zoom" in planned_actions
+                and budget_used() < budget
+                and "zoom" not in self.config.disabled_agents
+                and initial.bbox is not None
+            ):
+                # Zoom-only ablation: verification can refine the initial hypothesis
+                # but is not treated as global target search.
+                result = self.zoom_agent.run(
+                    make_context(),
+                    initial,
+                    self._next_candidate_id(candidates),
+                )
+                candidates.extend(result.candidates)
+                calls.append(result.call)
+                attempted.add("zoom")
+                preliminary_fusion = refresh_relation_and_fusion()
+
+            if (
+                search_risk
+                and not tile_search_performed
+                and budget_used() < budget
+                and "target" not in self.config.disabled_agents
+            ):
+                remaining = min(
+                    budget - budget_used(), self.config.max_target_tile_calls
+                )
+                for region in self.target_agent.proposal_regions(
+                    make_context(), initial, remaining
+                ):
+                    if budget_used() >= budget:
+                        break
+                    result = self.target_agent.run_transformed_view(
+                        make_context(),
+                        self._next_candidate_id(candidates),
+                        region,
                     )
+                    append_target_result(result)
+                    preliminary_fusion = refresh_relation_and_fusion()
+
             fusion = _safe_fusion(candidates, graph, self.config)
 
         fusion = _apply_false_repair_guard(fusion, initial, initial_score, self.config)
@@ -644,6 +768,14 @@ class HierarchicalParentAgent:
             if call.agent in specialized_units and call.status != "skipped"
         ]
         unit_perception_calls = [call for call in unit_calls if call.perception_call]
+        if (
+            self.config.method in {Method.HIERARCHICAL, Method.STATIC_ALL}
+            and len(unit_perception_calls) > self.config.max_child_perception_calls
+        ):
+            raise RuntimeError(
+                "Specialized perception budget exceeded: "
+                f"{len(unit_perception_calls)} > {self.config.max_child_perception_calls}"
+            )
         perception_calls = [call for call in calls if call.perception_call]
         executed_perception_calls = [
             call for call in perception_calls if call.model_call
@@ -673,6 +805,11 @@ class HierarchicalParentAgent:
                     "run_relation_reasoner": routing.run_relation_reasoner,
                     "action_utilities": routing.action_utilities,
                     "rationale": routing.rationale,
+                    "executed_perception_actions": [
+                        f"{call.agent}:{call.action}" for call in unit_perception_calls
+                    ],
+                    "budget_used": len(unit_perception_calls),
+                    "budget_limit": self.config.max_child_perception_calls,
                 },
                 "diagnosis": diagnosis,
                 "confirmed_diagnosis": diagnosis,
@@ -698,6 +835,8 @@ class HierarchicalParentAgent:
                 "context_candidates": [
                     to_jsonable(candidate) for candidate in context_candidates
                 ],
+                "hypothesis_clusters": fusion.evidence.get("hypotheses", []),
+                "final_hypothesis_id": fusion.evidence.get("top_hypothesis_id"),
                 "final_candidate_id": fusion.final.candidate_id,
                 "final_bbox": fusion.final.bbox,
                 "confidence": fusion.final.fused_score,
@@ -711,6 +850,19 @@ class HierarchicalParentAgent:
                 "executed_perception_calls": len(executed_perception_calls),
                 "specialized_unit_perception_calls": len(unit_perception_calls),
                 "specialized_unit_calls": len(unit_calls),
+                "specialized_model_calls": len(unit_perception_calls),
+                "target_search_calls": sum(
+                    call.agent == "TargetAgent" and call.perception_call
+                    for call in unit_calls
+                ),
+                "context_search_calls": sum(
+                    call.agent == "ContextAgent" and call.perception_call
+                    for call in unit_calls
+                ),
+                "zoom_verification_calls": sum(
+                    call.agent == "ZoomAgent" and call.perception_call
+                    for call in unit_calls
+                ),
                 "child_perception_calls": len(unit_perception_calls),
                 "child_agent_calls": len(unit_calls),
                 "relation_calls": sum(call.agent == "RelationAgent" for call in calls),

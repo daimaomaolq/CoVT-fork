@@ -89,6 +89,7 @@ class Candidate:
     raw_output: str = ""
     latency_ms: float = 0.0
     parent_candidate_id: str | None = None
+    hypothesis_id: str | None = None
     parse_ok: bool = True
     box_plausibility: float = 0.0
     target_consistency: float = 0.5
@@ -104,6 +105,8 @@ class Candidate:
 
     def __post_init__(self) -> None:
         self.parse_ok = self.bbox is not None
+        if self.hypothesis_id is None:
+            self.hypothesis_id = self.parent_candidate_id or self.candidate_id
 
 
 @dataclass
@@ -149,12 +152,19 @@ class AgenticConfig:
     competition_margin_threshold: float = 0.12
     final_confidence_threshold: float = 0.48
     information_gain_threshold: float = 0.02
-    zoom_scales: tuple[float, ...] = (1.5, 2.0)
+    zoom_scales: tuple[float, ...] = (2.5, 4.0)
+    zoom_min_crop_size: float = 0.16
     zoom_identity_iou_threshold: float = 0.05
     zoom_center_distance_threshold: float = 0.20
     zoom_relation_drop_tolerance: float = 0.15
     zoom_global_drop_tolerance: float = 0.10
     context_union_margin: float = 1.25
+    competition_probe_mode: str = "always"
+    target_tile_grid: int = 2
+    target_tile_overlap: float = 0.10
+    target_diversity_iou_threshold: float = 0.85
+    max_target_tile_calls: int = 2
+    verification_confidence_threshold: float = 0.35
     disabled_agents: set[str] = field(default_factory=set)
     feedback_mode: str = "template"
     enable_escalation: bool = True
@@ -195,6 +205,12 @@ class AgenticConfig:
             "zoom_center_distance_threshold": self.zoom_center_distance_threshold,
             "zoom_relation_drop_tolerance": self.zoom_relation_drop_tolerance,
             "zoom_global_drop_tolerance": self.zoom_global_drop_tolerance,
+            "zoom_min_crop_size": self.zoom_min_crop_size,
+            "target_tile_overlap": self.target_tile_overlap,
+            "target_diversity_iou_threshold": (self.target_diversity_iou_threshold),
+            "verification_confidence_threshold": (
+                self.verification_confidence_threshold
+            ),
             "false_repair_margin": self.false_repair_margin,
             "replacement_confidence_threshold": (self.replacement_confidence_threshold),
             "replacement_confidence_gain_threshold": (
@@ -224,6 +240,12 @@ class AgenticConfig:
             raise ValueError(
                 f"Fusion weights must be non-negative with positive sum: {weights}"
             )
+        if self.target_tile_grid < 2:
+            raise ValueError("target_tile_grid must be at least 2")
+        if self.max_target_tile_calls < 0:
+            raise ValueError("max_target_tile_calls must be non-negative")
+        if self.competition_probe_mode not in {"off", "risk", "always"}:
+            raise ValueError("competition_probe_mode must be off, risk, or always")
         if self.ambiguity_penalty_weight < 0:
             raise ValueError("ambiguity_penalty_weight must be non-negative")
         if not self.zoom_scales or any(scale <= 1.0 for scale in self.zoom_scales):

@@ -107,7 +107,11 @@ def apply_ordinal_scores(
     desired_index = {"second": 1, "third": 2}.get(ordinal, 0)
     scores = {}
     for index, candidate in enumerate(ordered):
-        score = 1.0 if index == desired_index else max(0.0, 0.5 - 0.2 * abs(index - desired_index))
+        score = (
+            1.0
+            if index == desired_index
+            else max(0.0, 0.5 - 0.2 * abs(index - desired_index))
+        )
         scores[candidate.candidate_id] = score
     return scores
 
@@ -117,13 +121,22 @@ class RelationAgent:
 
     def run(self, context: AgentContext) -> AgentResult:
         target_candidates = [
-            candidate for candidate in context.target_candidates if candidate.bbox is not None
+            candidate
+            for candidate in context.target_candidates
+            if candidate.bbox is not None
         ]
         context_candidates = [
-            candidate for candidate in context.context_candidates if candidate.bbox is not None
+            candidate
+            for candidate in context.context_candidates
+            if candidate.bbox is not None
+        ]
+        root_targets = [
+            candidate
+            for candidate in target_candidates
+            if candidate.parent_candidate_id is None
         ]
         ordinal_scores = apply_ordinal_scores(
-            target_candidates, context.graph.ordinal_constraint
+            root_targets, context.graph.ordinal_constraint
         )
         ranking = []
         unresolved = []
@@ -155,25 +168,30 @@ class RelationAgent:
             absolute_score = absolute_position_score(
                 target.bbox, context.graph.global_position
             )
-            ordinal_score = ordinal_scores.get(target.candidate_id)
+            root_id = (
+                target.hypothesis_id
+                or target.parent_candidate_id
+                or target.candidate_id
+            )
+            ordinal_score = ordinal_scores.get(root_id)
             if ordinal_score is not None:
                 target.global_constraint_score = ordinal_score
             elif SpatialFrame.GLOBAL_ABSOLUTE in context.graph.spatial_frames:
                 target.global_constraint_score = absolute_score
             else:
                 target.global_constraint_score = 0.5
-            ranking.append({
-                "target_candidate_id": target.candidate_id,
-                "context_candidate_id": best_context_id,
-                "relation_score": target.relation_consistency,
-                "relation_details": relation_details,
-                "global_constraint_score": target.global_constraint_score,
-            })
+            ranking.append(
+                {
+                    "target_candidate_id": target.candidate_id,
+                    "context_candidate_id": best_context_id,
+                    "relation_score": target.relation_consistency,
+                    "relation_details": relation_details,
+                    "global_constraint_score": target.global_constraint_score,
+                }
+            )
 
         ranking.sort(
-            key=lambda item: (
-                item["relation_score"] + item["global_constraint_score"]
-            ),
+            key=lambda item: (item["relation_score"] + item["global_constraint_score"]),
             reverse=True,
         )
         if (

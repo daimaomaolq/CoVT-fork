@@ -63,7 +63,9 @@ class ZoomAgent:
     ) -> tuple[list[float], bool]:
         assert seed.bbox is not None
         if not context.config.enable_semantic_frame_protection:
-            region = _ensure_minimum_crop(expand_box(seed.bbox, scale))
+            region = _ensure_minimum_crop(
+                expand_box(seed.bbox, scale), context.config.zoom_min_crop_size
+            )
             return region, False
         object_relative = SpatialFrame.OBJECT_RELATIVE in context.graph.spatial_frames
         valid_context = [
@@ -81,7 +83,10 @@ class ZoomAgent:
         else:
             region = expand_box(seed.bbox, scale)
             preserves_context = not object_relative
-        return _ensure_minimum_crop(region), preserves_context
+        return (
+            _ensure_minimum_crop(region, context.config.zoom_min_crop_size),
+            preserves_context,
+        )
 
     def run(
         self,
@@ -110,15 +115,11 @@ class ZoomAgent:
             transform=f"crop_scale_{scale:g}",
             preserves_context=preserves_context,
         )
-        protected_query = (
-            f"{context.graph.original} "
-            f"[This is a crop from whole-image normalized region {crop_region}. "
-            "Refine the already selected target identity. Interpret top/bottom/left/"
-            "right and ordinal terms in the original whole-image frame, not relative "
-            "to this crop, and do not re-rank identities using crop-local position.]"
-        )
+        # Crop-local grounding receives target semantics only. Direction, ordinal and
+        # target-context constraints remain in the parent and are re-applied after the
+        # local box is mapped back to the original image frame.
         zoom_query = (
-            protected_query
+            context.graph.local_target_query
             if context.config.enable_semantic_frame_protection
             else context.graph.original
         )
@@ -133,6 +134,7 @@ class ZoomAgent:
         local_bbox = candidate.bbox
         candidate.bbox = map_from_crop(candidate.bbox, crop_region)
         candidate.parse_ok = candidate.bbox is not None
+        candidate.hypothesis_id = seed.hypothesis_id or seed.candidate_id
         rejection_reasons = []
         if candidate.bbox is not None:
             identity_distance = center_distance(candidate.bbox, seed.bbox)
@@ -163,6 +165,12 @@ class ZoomAgent:
             input={
                 "seed_candidate_id": seed.candidate_id,
                 "query": zoom_query,
+                "query_scope": (
+                    "target_clause_without_global_coordinates"
+                    if context.config.enable_semantic_frame_protection
+                    else "full_query_ablation"
+                ),
+                "global_constraints_reapplied_after_mapping": True,
                 "spatial_frames": [
                     frame.value for frame in context.graph.spatial_frames
                 ],
@@ -180,6 +188,8 @@ class ZoomAgent:
                 "identity_center_distance": identity_distance,
                 "guard_passed": candidate.accepted_by_guard,
                 "rejection_reasons": rejection_reasons,
+                "hypothesis_id": candidate.hypothesis_id,
+                "verification_of": seed.candidate_id,
             },
             model_call=True,
             perception_call=True,

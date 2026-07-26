@@ -13,8 +13,10 @@ from PIL import Image
 
 from uav_agentic.agents.base import AgentContext
 from uav_agentic.agents.relation_reasoner import pair_relation_score
+from uav_agentic.agents.target_agent import TargetAgent, build_overlapping_tiles
 from uav_agentic.agents.zoom_agent import ZoomAgent
 from uav_agentic.evaluation import attach_evaluation, summarize
+from uav_agentic.fusion import rank_candidates
 from uav_agentic.io import (
     candidate_from_prediction,
     inference_input_from_row,
@@ -147,12 +149,18 @@ class QueryRoutingTests(unittest.TestCase):
         self.assertEqual(plan.perception_actions, ["target", "context"])
         self.assertTrue(plan.run_relation_reasoner)
 
-    def test_simple_high_confidence_query_does_not_dispatch(self):
+    def test_hierarchical_runs_minimum_competition_probe(self):
         graph = parse_query_constraints("the red car")
         initial = cached_candidate([0.2, 0.2, 0.4, 0.4])
         plan = DependencyAwareRouter().plan(initial, graph, AgenticConfig())
-        self.assertEqual(plan.perception_actions, [])
+        self.assertEqual(plan.perception_actions, ["target"])
         self.assertFalse(plan.run_relation_reasoner)
+        disabled = DependencyAwareRouter().plan(
+            initial,
+            graph,
+            AgenticConfig(competition_probe_mode="off"),
+        )
+        self.assertEqual(disabled.perception_actions, [])
 
     def test_no_query_rewrite_child_exists_in_routing(self):
         graph = parse_query_constraints(
@@ -184,6 +192,8 @@ class QueryRoutingTests(unittest.TestCase):
         self.assertEqual(relation.target, "player")
         self.assertEqual(relation.local_target_query, "attacking player")
         self.assertEqual(relation.context, "defensive player")
+        temporal_relation = parse_query_constraints("A rider who is temporarily behind")
+        self.assertEqual(temporal_relation.local_target_query, "rider")
 
 
 class RelationAndZoomTests(unittest.TestCase):
@@ -210,10 +220,64 @@ class RelationAndZoomTests(unittest.TestCase):
         )
         result = ZoomAgent().run(context, seed, "c01")
         query = grounder.calls[-1]["query"]
-        self.assertIn(graph.original, query)
-        self.assertIn("original whole-image frame", query)
+        self.assertEqual(query, "small car")
+        self.assertNotIn("upper left", query)
+        self.assertTrue(result.call.input["global_constraints_reapplied_after_mapping"])
         self.assertEqual(result.call.output["local_bbox"], [0.25, 0.25, 0.75, 0.75])
         self.assertIsNotNone(result.call.output["global_bbox"])
+        self.assertEqual(result.candidates[0].hypothesis_id, seed.candidate_id)
+
+    def test_target_transformed_view_maps_to_global_frame(self):
+        grounder = FakeGrounder()
+        graph = parse_query_constraints("the small car in the upper left")
+        seed = cached_candidate([0.75, 0.75, 0.80, 0.80])
+        context = AgentContext(
+            image=Image.new("RGB", (100, 100), "white"),
+            graph=graph,
+            grounder=grounder,
+            config=AgenticConfig(),
+            target_candidates=[seed],
+            context_candidates=[],
+        )
+        result = TargetAgent().run_transformed_view(
+            context, "c01", [0.0, 0.0, 0.55, 0.55]
+        )
+        self.assertEqual(result.call.input["query"], "small car")
+        self.assertEqual(result.call.output["local_bbox"], [0.10, 0.50, 0.20, 0.60])
+        self.assertEqual(
+            result.call.output["global_bbox"],
+            [0.05500000000000001, 0.275, 0.11000000000000001, 0.33],
+        )
+        self.assertEqual(len(build_overlapping_tiles(2, 0.10)), 4)
+
+    def test_hypothesis_fusion_uses_zoom_support_not_competitor_overlap(self):
+        initial = cached_candidate([0.1, 0.1, 0.2, 0.2], confidence=0.65)
+        alternative = Candidate(
+            candidate_id="c01",
+            bbox=[0.60, 0.60, 0.70, 0.70],
+            source_agent="TargetAgent",
+            query_used="car",
+            observation=Observation("target", "full_image_target_probe"),
+            bbox_token_confidence=0.45,
+        )
+        verification = Candidate(
+            candidate_id="c02",
+            bbox=[0.61, 0.61, 0.71, 0.71],
+            source_agent="ZoomAgent",
+            query_used="car",
+            observation=Observation("zoom", "crop_zoom"),
+            bbox_token_confidence=0.50,
+            parent_candidate_id="c01",
+        )
+        fusion = rank_candidates(
+            [initial, alternative, verification],
+            parse_query_constraints("the car"),
+            AgenticConfig(),
+        )
+        self.assertEqual(fusion.evidence["top_hypothesis_id"], "c01")
+        selected = fusion.evidence["selected_hypothesis"]
+        self.assertTrue(selected["cross_view_supported"])
+        self.assertEqual(selected["supporting_verification_ids"], ["c02"])
 
 
 class ParentIntegrationTests(unittest.TestCase):
@@ -236,6 +300,85 @@ class ParentIntegrationTests(unittest.TestCase):
         self.assertIn("diagnosis", result["inference"])
         self.assertIn("action_trace", result["inference"])
         self.assertFalse(result["inference"]["question_e_used"])
+        self.assertLessEqual(
+            result["inference"]["routing_plan"]["budget_used"],
+            config.max_child_perception_calls,
+        )
+        self.assertIn("hypothesis_clusters", result["inference"])
+
+    def test_small_target_uses_probe_tile_then_zoom_within_budget(self):
+        grounder = FakeGrounder()
+        config = AgenticConfig(
+            method=Method.HIERARCHICAL,
+            max_child_perception_calls=3,
+            small_area_threshold=0.02,
+            feedback_mode="off",
+        )
+        result = HierarchicalParentAgent(grounder, config).run(
+            "s_tile",
+            Image.new("RGB", (100, 100), "white"),
+            "the small car",
+            cached_initial=cached_candidate([0.10, 0.50, 0.20, 0.60], confidence=0.5),
+        )
+        actions = result["inference"]["routing_plan"]["executed_perception_actions"]
+        self.assertEqual(
+            actions,
+            [
+                "TargetAgent:global_competition_probe",
+                "TargetAgent:transformed_view_target_search",
+                "ZoomAgent:semantic_frame_preserving_zoom",
+            ],
+        )
+        self.assertEqual(result["inference"]["routing_plan"]["budget_used"], 3)
+        zoom = next(
+            item
+            for item in result["inference"]["target_candidates"]
+            if item["source_agent"] == "ZoomAgent"
+        )
+        parent = next(
+            item
+            for item in result["inference"]["target_candidates"]
+            if item["candidate_id"] == zoom["parent_candidate_id"]
+        )
+        self.assertEqual(parent["observation"]["view_type"], "target_search_tile")
+        self.assertEqual(zoom["hypothesis_id"], parent["candidate_id"])
+
+    def test_dynamic_scheduler_never_exceeds_budget_across_query_types(self):
+        queries = [
+            "the red car",
+            "the tiny person",
+            "the tricycle parked on the crosswalk",
+            "the second vehicle from the left",
+            "the car about to enter the road",
+        ]
+        disabled_sets = [set(), {"zoom"}, {"context"}, {"target"}]
+        for budget in range(4):
+            for query in queries:
+                for disabled in disabled_sets:
+                    with self.subTest(
+                        budget=budget, query=query, disabled=sorted(disabled)
+                    ):
+                        config = AgenticConfig(
+                            method=Method.HIERARCHICAL,
+                            max_child_perception_calls=budget,
+                            disabled_agents=disabled,
+                            feedback_mode="off",
+                        )
+                        result = HierarchicalParentAgent(FakeGrounder(), config).run(
+                            "budget_audit",
+                            Image.new("RGB", (64, 64), "white"),
+                            query,
+                            cached_initial=cached_candidate(
+                                [0.40, 0.40, 0.50, 0.50], confidence=0.5
+                            ),
+                        )
+                        self.assertLessEqual(
+                            result["cost"]["specialized_model_calls"], budget
+                        )
+                        self.assertEqual(
+                            result["cost"]["specialized_model_calls"],
+                            result["inference"]["routing_plan"]["budget_used"],
+                        )
 
     def test_one_pass_cached_uses_no_model_call(self):
         grounder = FakeGrounder()
@@ -442,6 +585,11 @@ class EvaluationTests(unittest.TestCase):
         self.assertIn("Recovery@0.5", summary["agentic_inference"])
         self.assertIn("Recall", summary["failure_detection"])
         self.assertIn("CandidateRecall@2", summary["candidate_and_selection"])
+        self.assertIn(
+            "Alternative Candidate Recall@0.5",
+            summary["candidate_and_selection"],
+        )
+        self.assertIn("Search Yield@DeltaIoU0.1", summary["candidate_and_selection"])
         self.assertIn("Latency_P95_ms", summary["agentic_inference"])
         self.assertEqual(summary["one_pass"]["class_counts"]["vehicle"], 1)
         self.assertFalse(summary["protocol_guards"]["question_e_used"])

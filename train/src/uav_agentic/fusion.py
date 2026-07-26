@@ -37,6 +37,14 @@ def _candidate_score(candidate: Candidate, config: AgenticConfig) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _root_id(candidate: Candidate) -> str:
+    return (
+        candidate.hypothesis_id
+        or candidate.parent_candidate_id
+        or candidate.candidate_id
+    )
+
+
 def _apply_zoom_guards(
     candidates: list[Candidate],
     by_id: dict[str, Candidate],
@@ -75,46 +83,17 @@ def _apply_zoom_guards(
         candidate.rejection_reasons = list(dict.fromkeys(candidate.rejection_reasons))
 
 
-def rank_candidates(
-    candidates: list[Candidate],
+def _apply_global_constraints(
+    valid: list[Candidate],
     graph: QueryConstraintGraph,
-    config: AgenticConfig,
-) -> FusionResult:
-    valid = [candidate for candidate in candidates if candidate.bbox is not None]
-    if not valid:
-        raise ValueError("rank_candidates requires at least one valid candidate")
-    target_specialists = [
-        candidate for candidate in valid if candidate.source_agent == "TargetAgent"
-    ]
-    ordinal_scores = apply_ordinal_scores(valid, graph.ordinal_constraint)
+) -> None:
+    roots = [candidate for candidate in valid if candidate.parent_candidate_id is None]
+    ordinal_scores = apply_ordinal_scores(roots, graph.ordinal_constraint)
+    root_by_id = {candidate.candidate_id: candidate for candidate in roots}
     for candidate in valid:
-        candidate.box_plausibility = box_plausibility(candidate.bbox)
-        other_ious = [
-            box_iou(candidate.bbox, other.bbox)
-            for other in valid
-            if other.candidate_id != candidate.candidate_id
-        ]
-        candidate.observation_agreement = max(other_ious, default=0.0)
-        if target_specialists:
-            if candidate.source_agent == "TargetAgent":
-                support_candidates = [
-                    other
-                    for other in valid
-                    if other.candidate_id != candidate.candidate_id
-                ]
-            else:
-                support_candidates = target_specialists
-            candidate.target_consistency = max(
-                (
-                    box_iou(candidate.bbox, support.bbox)
-                    for support in support_candidates
-                ),
-                default=0.5,
-            )
-        else:
-            candidate.target_consistency = 0.5
-        if candidate.candidate_id in ordinal_scores:
-            candidate.global_constraint_score = ordinal_scores[candidate.candidate_id]
+        root = root_by_id.get(_root_id(candidate), candidate)
+        if root.candidate_id in ordinal_scores:
+            candidate.global_constraint_score = ordinal_scores[root.candidate_id]
         elif SpatialFrame.GLOBAL_ABSOLUTE in graph.spatial_frames:
             candidate.global_constraint_score = absolute_position_score(
                 candidate.bbox, graph.global_position
@@ -124,10 +103,88 @@ def rank_candidates(
             and SpatialFrame.GLOBAL_ABSOLUTE not in graph.spatial_frames
         ):
             candidate.global_constraint_score = 0.5
-        candidate.ambiguity_penalty = 0.0
-        candidate.fused_score = _candidate_score(candidate, config)
 
-    preliminary = sorted(valid, key=lambda item: item.fused_score, reverse=True)
+
+def rank_candidates(
+    candidates: list[Candidate],
+    graph: QueryConstraintGraph,
+    config: AgenticConfig,
+) -> FusionResult:
+    """Rank identity hypotheses, not a flat list of mutually supporting boxes."""
+    valid = [candidate for candidate in candidates if candidate.bbox is not None]
+    if not valid:
+        raise ValueError("rank_candidates requires at least one valid candidate")
+    by_id = {candidate.candidate_id: candidate for candidate in valid}
+    for candidate in valid:
+        candidate.hypothesis_id = _root_id(candidate)
+        candidate.box_plausibility = box_plausibility(candidate.bbox)
+        candidate.ambiguity_penalty = 0.0
+        candidate.accepted_by_guard = not candidate.rejection_reasons
+    _apply_global_constraints(valid, graph)
+    _apply_zoom_guards(valid, by_id, config)
+
+    roots = [candidate for candidate in valid if candidate.parent_candidate_id is None]
+    children_by_root: dict[str, list[Candidate]] = {}
+    for candidate in valid:
+        if candidate.parent_candidate_id is not None:
+            children_by_root.setdefault(_root_id(candidate), []).append(candidate)
+
+    representatives: list[Candidate] = []
+    hypotheses: list[dict] = []
+    for root in roots:
+        members = [root, *children_by_root.get(root.candidate_id, [])]
+        accepted_children = [
+            candidate
+            for candidate in members[1:]
+            if candidate.accepted_by_guard and candidate.bbox is not None
+        ]
+        stability = max(
+            (box_iou(root.bbox, candidate.bbox) for candidate in accepted_children),
+            default=0.0,
+        )
+        supporting_children = [
+            candidate
+            for candidate in accepted_children
+            if box_iou(root.bbox, candidate.bbox)
+            >= config.replacement_cross_view_iou_threshold
+            and root.bbox_token_confidence >= config.verification_confidence_threshold
+            and candidate.bbox_token_confidence
+            >= config.verification_confidence_threshold
+        ]
+        cross_view_supported = bool(supporting_children)
+        target_evidence = stability if cross_view_supported else 0.5
+        for candidate in members:
+            candidate.target_consistency = target_evidence
+            candidate.observation_agreement = stability if accepted_children else 0.0
+            candidate.fused_score = _candidate_score(candidate, config)
+        eligible = [root, *accepted_children]
+        representative = max(eligible, key=lambda item: item.fused_score)
+        representatives.append(representative)
+        hypotheses.append(
+            {
+                "hypothesis_id": root.candidate_id,
+                "root_candidate_id": root.candidate_id,
+                "root_source_agent": root.source_agent,
+                "member_candidate_ids": [item.candidate_id for item in members],
+                "accepted_verification_ids": [
+                    item.candidate_id for item in accepted_children
+                ],
+                "supporting_verification_ids": [
+                    item.candidate_id for item in supporting_children
+                ],
+                "cross_view_iou": stability,
+                "cross_view_supported": cross_view_supported,
+                "representative_candidate_id": representative.candidate_id,
+                "hypothesis_score": representative.fused_score,
+            }
+        )
+
+    if not representatives:
+        representatives = sorted(valid, key=lambda item: item.fused_score, reverse=True)
+
+    preliminary = sorted(
+        representatives, key=lambda item: item.fused_score, reverse=True
+    )
     if len(preliminary) > 1:
         first, second = preliminary[:2]
         margin = first.fused_score - second.fused_score
@@ -138,33 +195,34 @@ def rank_candidates(
             first.fused_score = _candidate_score(first, config)
             second.fused_score = _candidate_score(second, config)
 
-    by_id = {candidate.candidate_id: candidate for candidate in valid}
-    _apply_zoom_guards(valid, by_id, config)
     ranked = sorted(
-        [candidate for candidate in valid if candidate.accepted_by_guard],
+        [candidate for candidate in representatives if candidate.accepted_by_guard],
         key=lambda item: item.fused_score,
         reverse=True,
     )
-    if not ranked:
-        # Guard failure must not erase every prediction. Fall back to the best non-zoom
-        # valid candidate and preserve the rejection trace.
-        ranked = sorted(
-            [candidate for candidate in valid if candidate.source_agent != "ZoomAgent"],
-            key=lambda item: item.fused_score,
-            reverse=True,
-        )
     if not ranked:
         ranked = preliminary
     for index, candidate in enumerate(ranked):
         next_score = ranked[index + 1].fused_score if index + 1 < len(ranked) else 0.0
         candidate.competition_margin = candidate.fused_score - next_score
     final = ranked[0]
+
+    hypothesis_by_id = {item["hypothesis_id"]: item for item in hypotheses}
+    for item in hypotheses:
+        representative = by_id.get(item["representative_candidate_id"])
+        if representative is not None:
+            item["hypothesis_score"] = representative.fused_score
     evidence = {
         "valid_candidate_count": len(valid),
+        "hypothesis_count": len(hypotheses),
         "accepted_candidate_count": len(ranked),
         "ranked_candidate_ids": [candidate.candidate_id for candidate in ranked],
+        "ranked_hypothesis_ids": [_root_id(candidate) for candidate in ranked],
+        "top_hypothesis_id": _root_id(final),
         "top_margin": final.competition_margin,
         "top_score": final.fused_score,
+        "hypotheses": hypotheses,
+        "selected_hypothesis": hypothesis_by_id.get(_root_id(final), {}),
         "rejected_candidates": {
             candidate.candidate_id: candidate.rejection_reasons
             for candidate in valid

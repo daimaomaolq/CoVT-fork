@@ -251,6 +251,12 @@ def _extract_target_clause(original: str, lower: str) -> str:
     clause = original[: split.start()] if split is not None else original
     clause = ARTICLE_PATTERN.sub("", clause.strip(" ,.;:"))
     clause = _remove_global_phrases(clause)
+    clause = re.sub(
+        r"\b(?:who|that|which)\s+(?:is|are)\s+(?:temporarily|currently)\s*$",
+        "",
+        clause,
+        flags=re.IGNORECASE,
+    ).strip(" ,.;:")
     return clause or original
 
 

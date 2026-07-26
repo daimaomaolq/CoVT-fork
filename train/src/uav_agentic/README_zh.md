@@ -12,10 +12,10 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 
 系统是一个负责诊断、路由与决策的层级感知 Agent，按需调用四类专用功能单元；不是多个自治 Agent 协作，也不包含 Query Rewrite 单元：
 
-- `TargetAgent`：依据 target 和 attribute 在全图重新搜索目标候选。其结果仍须经过完整 query 约束验证，不能直接成为答案。
+- `TargetAgent`：先用 target clause 进行全图竞争探测；当候选重复 initial 且仍存在风险时，在不包含当前候选的重叠分区 transformed views 中搜索多个根假设，局部框统一映射回原图。
 - `ContextAgent`：定位 context 区域。context bbox 只作为关系证据，不会混入最终 target bbox 候选。
 - `RelationAgent`：对 target/context 配对、全局位置和顺序约束进行排序；它是无需额外视觉模型调用的推理 Agent。
-- `ZoomAgent`：对身份已稳定的候选执行 crop-based zoom-in，重新调用同一个 grounding backbone，并将局部 bbox 映射回原图。
+- `ZoomAgent`：不负责从错误 initial 中搜索逃逸，只对父控制器选出的候选假设执行 crop-based zoom-in 验证，并将局部 bbox 映射回原图形成独立支持证据。
 
 层级感知 Agent 负责 query constraint graph、无监督可靠性检查、依赖感知路由、全局竞争、候选加权融合、停止和升级。Target、Context、Zoom 是二次感知单元，Relation 是结构化关系推理单元；它们没有独立目标、长期状态或自治决策权，最终 bbox 只能由控制器选择。
 
@@ -30,7 +30,9 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 - 最大 specialized-unit perception call 预算；
 - 消融实验禁用的 Agent。
 
-简单、高置信的 target-only query 可以不调用任何专用单元。关系 query 通常先调用 Target 和 Context，再由 Relation 排序；仅有小目标或粗框风险时才进入 Zoom。`static_all` 固定调用对当前 query 适用的全部单元，用作非自适应派发对照。
+`hierarchical` 默认对每条样本执行一次最小全图 Target competition probe，因为单个高置信预测无法暴露“自信但定位错误”。随后才按分歧和风险动态使用剩余预算：分离的替代假设优先交给 Zoom 验证；Target probe 只重复 initial 时，小目标、粗框、关系、全局位置、顺序或时序风险触发重叠分区搜索。关系 query 在预算允许时保留 Context 证据。`competition_probe_mode=off|risk|always` 用于成本分析，默认 `always`。
+
+预算 K 按 Target、Context、Zoom 的真实视觉模型调用逐次扣减，而不是按动作类型计数；Relation 是无视觉模型调用的结构化推理。运行时存在硬断言，任何路径超过 K 都会失败而不是静默超预算。
 
 候选融合不是 bbox 平均或无条件投票。默认权重为：
 
@@ -44,7 +46,7 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 - ambiguity penalty
 ```
 
-正权重自动归一化。`TargetAgent` 的来源身份不会自动获得 1.0 target consistency；target consistency 由它与基础框、Zoom 视图及其他候选的一致性计算，避免专用单元自证。
+正权重自动归一化。融合对象是 identity hypothesis cluster，而不是平坦候选列表：Base 和不同 Target 根框是互相竞争的假设，彼此 IoU 只表示冲突，不能相互提供 target consistency；只有以某个根候选为父节点的 Zoom transformed view 才能给该假设提供跨观察稳定性。每个假设选择 root 或 Zoom refined box 作为 representative，再在假设级进行 relation/global/ambiguity 竞争。
 
 有效 initial bbox 默认受 evidence-supported replacement guard 保护。非初始候选只有同时满足可比分数增益，并获得下列至少一种独立证据时，才允许成为 final bbox：
 
@@ -62,11 +64,12 @@ trace 在 `verification_evidence.fusion` 中记录 `comparable_initial_score`、
 Zoom 只是 single-image transformed observation view，不是真实多视角或多 UAV：
 
 1. object-relative query 优先使用 target/context 的 union crop，保留双方证据；
-2. Zoom 始终保留原始完整 query；
-3. prompt 明确左上、右下、全局方位和顺序词属于原图坐标系，不能按 crop 局部坐标重新解释；
-4. 局部框映射回原图后执行 identity IoU/center、relation drop、global-position drop 三类 guard；
-5. 候选身份竞争未稳定时跳过 Zoom；
-6. trace 同时记录 `local_bbox` 和 `global_bbox`。
+2. crop grounding 只接收去除全局方向、顺序和 target-context 关系后的 target clause；
+3. 左上、右下、全局方位和顺序约束始终由父控制器在局部框映射回原图后重新计算，绝不按 crop 坐标解释；
+4. Target 分区搜索使用带重叠的确定性 transformed observation views，并优先观察不包含 initial 中心的区域；
+5. 局部框映射回原图后执行 identity IoU/center、relation drop、global-position drop 三类 guard；
+6. Zoom 的 `parent_candidate_id` 与 `hypothesis_id` 明确绑定被验证根候选；
+7. trace 同时记录 `local_bbox`、`global_bbox`、crop region 和全局约束重应用标记。
 
 因此 crop 的局部置信度不能覆盖全局语义约束。
 
@@ -92,7 +95,7 @@ sample_id, image, query, class
 - `inference.confidence`；
 - `inference.unit_calls`；
 - `inference.child_calls` 仅作为兼容早期实验协议的同值别名；
-- constraint graph、routing plan、target/context candidates 和 verification evidence；
+- constraint graph、routing plan、实际 budget 使用、target/context candidates、`hypothesis_clusters` 和 verification evidence；
 - `decision = accept | refine | escalate` 与 `stop_reason`；
 - 预算耗尽或观测不足时的 `human_feedback`；
 - 独立的 `evaluation`，其中才允许出现 GT 和 IoU；
@@ -139,7 +142,7 @@ bash train/scripts/run_dvgbench_agentic_v3_matrix.sh \
 - 定位：mIoU、Acc@0.5、DVGBench_AVG、per-class Acc@0.5；
 - 恢复：Recovery@0.5、False Repair Rate、Regression@0.5、Net Recovery Count；
 - 失败检测：Precision、Recall、Specificity、False Dispatch Rate、AUROC、AUPRC；
-- 候选与选择：CandidateRecall@1/2/3、Candidate Oracle Acc@0.5、Selection Success Given Oracle Hit、Oracle Gap；
+- 候选与选择：CandidateRecall@1/2/3、Candidate Oracle Acc@0.5、Alternative Candidate Recall@0.5、Alternative Selection Success、Search Yield@DeltaIoU0.1、Mean Candidate/Hypothesis Count、Candidate Diversity、Root Verification Rate、Oracle Gap；
 - 成本：Avg Calls、Avg Executed Calls、Avg Specialized Unit Calls、初始/增量/端到端 mean/P50/P95 latency、Dispatch Rate；
 - 选择性预测：Coverage、Selective Acc@0.5、Escalation Rate；
 - 其他：confidence ECE/Brier、failure-type recovery、dispatch distribution、每个专用单元的调用和 IoU gain、反馈有效率与回退率。

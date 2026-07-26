@@ -105,12 +105,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--competition-margin-threshold", type=float, default=0.12)
     parser.add_argument("--final-confidence-threshold", type=float, default=0.48)
     parser.add_argument("--information-gain-threshold", type=float, default=0.02)
-    parser.add_argument("--zoom-scales", type=float, nargs="+", default=[1.5, 2.0])
+    parser.add_argument("--zoom-scales", type=float, nargs="+", default=[2.5, 4.0])
+    parser.add_argument("--zoom-min-crop-size", type=float, default=0.16)
     parser.add_argument("--zoom-identity-iou-threshold", type=float, default=0.05)
     parser.add_argument("--zoom-center-distance-threshold", type=float, default=0.20)
     parser.add_argument("--zoom-relation-drop-tolerance", type=float, default=0.15)
     parser.add_argument("--zoom-global-drop-tolerance", type=float, default=0.10)
     parser.add_argument("--context-union-margin", type=float, default=1.25)
+    parser.add_argument(
+        "--competition-probe-mode",
+        choices=("off", "risk", "always"),
+        default="always",
+    )
+    parser.add_argument("--target-tile-grid", type=int, default=2)
+    parser.add_argument("--target-tile-overlap", type=float, default=0.10)
+    parser.add_argument("--target-diversity-iou-threshold", type=float, default=0.85)
+    parser.add_argument("--max-target-tile-calls", type=int, default=2)
+    parser.add_argument("--verification-confidence-threshold", type=float, default=0.35)
     parser.add_argument("--no-constraint-graph", action="store_true")
     parser.add_argument("--no-semantic-frame-protection", action="store_true")
     parser.add_argument("--no-false-repair-guard", action="store_true")
@@ -159,11 +170,18 @@ def build_agent_config(args: argparse.Namespace) -> AgenticConfig:
         final_confidence_threshold=args.final_confidence_threshold,
         information_gain_threshold=args.information_gain_threshold,
         zoom_scales=tuple(args.zoom_scales),
+        zoom_min_crop_size=args.zoom_min_crop_size,
         zoom_identity_iou_threshold=args.zoom_identity_iou_threshold,
         zoom_center_distance_threshold=args.zoom_center_distance_threshold,
         zoom_relation_drop_tolerance=args.zoom_relation_drop_tolerance,
         zoom_global_drop_tolerance=args.zoom_global_drop_tolerance,
         context_union_margin=args.context_union_margin,
+        competition_probe_mode=args.competition_probe_mode,
+        target_tile_grid=args.target_tile_grid,
+        target_tile_overlap=args.target_tile_overlap,
+        target_diversity_iou_threshold=args.target_diversity_iou_threshold,
+        max_target_tile_calls=args.max_target_tile_calls,
+        verification_confidence_threshold=args.verification_confidence_threshold,
         enable_constraint_graph=not args.no_constraint_graph,
         enable_semantic_frame_protection=not args.no_semantic_frame_protection,
         enable_false_repair_guard=not args.no_false_repair_guard,
