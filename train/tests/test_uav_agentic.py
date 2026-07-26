@@ -283,6 +283,86 @@ class RelationAndZoomTests(unittest.TestCase):
         self.assertTrue(selected["cross_view_supported"])
         self.assertEqual(selected["supporting_verification_ids"], ["c02"])
 
+    def test_verified_alternative_beats_later_unverified_high_score_proposal(self):
+        initial = cached_candidate([0.1, 0.1, 0.2, 0.2], confidence=0.65)
+        alternative = Candidate(
+            candidate_id="c01",
+            bbox=[0.60, 0.60, 0.70, 0.70],
+            source_agent="TargetAgent",
+            query_used="car",
+            observation=Observation("target", "full_image_target_probe"),
+            bbox_token_confidence=0.45,
+        )
+        verification = Candidate(
+            candidate_id="c02",
+            bbox=[0.61, 0.61, 0.71, 0.71],
+            source_agent="ZoomAgent",
+            query_used="car",
+            observation=Observation(
+                "zoom", "crop_zoom", crop_region=[0.55, 0.55, 0.80, 0.80]
+            ),
+            bbox_token_confidence=0.50,
+            parent_candidate_id="c01",
+        )
+        unverified = Candidate(
+            candidate_id="c03",
+            bbox=[0.80, 0.05, 0.95, 0.20],
+            source_agent="TargetAgent",
+            query_used="car",
+            observation=Observation("target", "overlapping_tile_search"),
+            bbox_token_confidence=0.99,
+        )
+        fusion = rank_candidates(
+            [initial, alternative, verification, unverified],
+            parse_query_constraints("the car"),
+            AgenticConfig(),
+        )
+        self.assertEqual(fusion.evidence["top_hypothesis_id"], "c01")
+        self.assertEqual(
+            fusion.evidence["selected_hypothesis"]["verification_tier"],
+            "independently_verified",
+        )
+        unverified_hypothesis = next(
+            item
+            for item in fusion.evidence["hypotheses"]
+            if item["hypothesis_id"] == "c03"
+        )
+        self.assertEqual(
+            unverified_hypothesis["verification_tier"], "unverified_proposal"
+        )
+
+    def test_verified_initial_beats_unverified_high_score_alternative(self):
+        initial = cached_candidate([0.1, 0.1, 0.2, 0.2], confidence=0.45)
+        verification = Candidate(
+            candidate_id="c01",
+            bbox=[0.105, 0.105, 0.205, 0.205],
+            source_agent="ZoomAgent",
+            query_used="car",
+            observation=Observation(
+                "zoom", "crop_zoom", crop_region=[0.0, 0.0, 0.35, 0.35]
+            ),
+            bbox_token_confidence=0.50,
+            parent_candidate_id="c00",
+        )
+        unverified = Candidate(
+            candidate_id="c02",
+            bbox=[0.70, 0.70, 0.90, 0.90],
+            source_agent="TargetAgent",
+            query_used="car",
+            observation=Observation("target", "overlapping_tile_search"),
+            bbox_token_confidence=0.99,
+        )
+        fusion = rank_candidates(
+            [initial, verification, unverified],
+            parse_query_constraints("the car"),
+            AgenticConfig(),
+        )
+        self.assertEqual(fusion.evidence["top_hypothesis_id"], "c00")
+        self.assertEqual(
+            fusion.evidence["selected_hypothesis"]["verification_tier"],
+            "independently_verified",
+        )
+
     def test_full_image_zoom_cannot_count_as_independent_support(self):
         initial = cached_candidate([0.1, 0.1, 0.2, 0.2], confidence=0.65)
         alternative = Candidate(
