@@ -159,6 +159,10 @@ class AgenticConfig:
     feedback_mode: str = "template"
     enable_escalation: bool = True
     include_raw_output: bool = False
+    enable_constraint_graph: bool = True
+    enable_semantic_frame_protection: bool = True
+    enable_false_repair_guard: bool = True
+    false_repair_margin: float = 0.02
     front_behind_axis: str = "unknown"
     weight_full_confidence: float = 0.30
     weight_shape: float = 0.10
@@ -187,8 +191,11 @@ class AgenticConfig:
             "zoom_center_distance_threshold": self.zoom_center_distance_threshold,
             "zoom_relation_drop_tolerance": self.zoom_relation_drop_tolerance,
             "zoom_global_drop_tolerance": self.zoom_global_drop_tolerance,
+            "false_repair_margin": self.false_repair_margin,
         }
-        invalid = {name: value for name, value in bounded.items() if not 0 <= value <= 1}
+        invalid = {
+            name: value for name, value in bounded.items() if not 0 <= value <= 1
+        }
         if invalid:
             raise ValueError(f"Thresholds must be in [0, 1]: {invalid}")
         weights = {
@@ -200,7 +207,9 @@ class AgenticConfig:
             "stability": self.weight_stability,
         }
         if any(value < 0 for value in weights.values()) or sum(weights.values()) <= 0:
-            raise ValueError(f"Fusion weights must be non-negative with positive sum: {weights}")
+            raise ValueError(
+                f"Fusion weights must be non-negative with positive sum: {weights}"
+            )
         if self.ambiguity_penalty_weight < 0:
             raise ValueError("ambiguity_penalty_weight must be non-negative")
         if not self.zoom_scales or any(scale <= 1.0 for scale in self.zoom_scales):
@@ -209,7 +218,9 @@ class AgenticConfig:
             raise ValueError("feedback_mode must be off, template, or base")
         if self.front_behind_axis not in {"unknown", "y"}:
             raise ValueError("front_behind_axis must be unknown or y")
-        unknown = self.disabled_agents.difference({"target", "context", "relation", "zoom"})
+        unknown = self.disabled_agents.difference(
+            {"target", "context", "relation", "zoom"}
+        )
         if unknown:
             raise ValueError(f"Unknown disabled agents: {sorted(unknown)}")
 

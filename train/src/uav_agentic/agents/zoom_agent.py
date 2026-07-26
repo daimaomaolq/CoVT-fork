@@ -13,7 +13,9 @@ from ..schema import AgentCall, Candidate, Observation, SpatialFrame, to_jsonabl
 from .base import AgentContext, AgentResult
 
 
-def _ensure_minimum_crop(region: list[float], minimum_size: float = 0.08) -> list[float]:
+def _ensure_minimum_crop(
+    region: list[float], minimum_size: float = 0.08
+) -> list[float]:
     x1, y1, x2, y2 = region
     width, height = x2 - x1, y2 - y1
     if width >= minimum_size and height >= minimum_size:
@@ -32,12 +34,14 @@ def _ensure_minimum_crop(region: list[float], minimum_size: float = 0.08) -> lis
 def _crop_image(image: Image.Image, region: list[float]) -> Image.Image:
     width, height = image.size
     x1, y1, x2, y2 = region
-    return image.crop((
-        round(x1 * width),
-        round(y1 * height),
-        round(x2 * width),
-        round(y2 * height),
-    ))
+    return image.crop(
+        (
+            round(x1 * width),
+            round(y1 * height),
+            round(x2 * width),
+            round(y2 * height),
+        )
+    )
 
 
 class ZoomAgent:
@@ -45,7 +49,11 @@ class ZoomAgent:
 
     def _select_scale(self, seed: Candidate, context: AgentContext) -> float:
         scales = sorted(context.config.zoom_scales)
-        return scales[-1] if box_area(seed.bbox) < context.config.small_area_threshold else scales[0]
+        return (
+            scales[-1]
+            if box_area(seed.bbox) < context.config.small_area_threshold
+            else scales[0]
+        )
 
     def _build_crop(
         self,
@@ -54,9 +62,13 @@ class ZoomAgent:
         scale: float,
     ) -> tuple[list[float], bool]:
         assert seed.bbox is not None
+        if not context.config.enable_semantic_frame_protection:
+            region = _ensure_minimum_crop(expand_box(seed.bbox, scale))
+            return region, False
         object_relative = SpatialFrame.OBJECT_RELATIVE in context.graph.spatial_frames
         valid_context = [
-            candidate for candidate in context.context_candidates
+            candidate
+            for candidate in context.context_candidates
             if candidate.bbox is not None
         ]
         if object_relative and valid_context:
@@ -98,12 +110,17 @@ class ZoomAgent:
             transform=f"crop_scale_{scale:g}",
             preserves_context=preserves_context,
         )
-        zoom_query = (
+        protected_query = (
             f"{context.graph.original} "
             f"[This is a crop from whole-image normalized region {crop_region}. "
             "Refine the already selected target identity. Interpret top/bottom/left/"
             "right and ordinal terms in the original whole-image frame, not relative "
             "to this crop, and do not re-rank identities using crop-local position.]"
+        )
+        zoom_query = (
+            protected_query
+            if context.config.enable_semantic_frame_protection
+            else context.graph.original
         )
         candidate = context.grounder.ground(
             crop,
@@ -120,15 +137,16 @@ class ZoomAgent:
         if candidate.bbox is not None:
             identity_distance = center_distance(candidate.bbox, seed.bbox)
             if (
-                identity_distance > context.config.zoom_center_distance_threshold
-                and candidate.bbox is not None
+                context.config.enable_semantic_frame_protection
+                and identity_distance > context.config.zoom_center_distance_threshold
             ):
                 rejection_reasons.append("zoom_identity_shift")
         else:
             identity_distance = 1.0
             rejection_reasons.append("zoom_parse_failed")
         if (
-            SpatialFrame.OBJECT_RELATIVE in context.graph.spatial_frames
+            context.config.enable_semantic_frame_protection
+            and SpatialFrame.OBJECT_RELATIVE in context.graph.spatial_frames
             and not preserves_context
         ):
             rejection_reasons.append("context_not_preserved")
@@ -137,7 +155,11 @@ class ZoomAgent:
         call = AgentCall(
             call_id=f"call_{candidate_id}",
             agent=self.name,
-            action="semantic_frame_preserving_zoom",
+            action=(
+                "semantic_frame_preserving_zoom"
+                if context.config.enable_semantic_frame_protection
+                else "naive_crop_zoom"
+            ),
             input={
                 "seed_candidate_id": seed.candidate_id,
                 "query": zoom_query,
@@ -147,6 +169,7 @@ class ZoomAgent:
                 "crop_region": crop_region,
                 "scale": scale,
                 "preserves_context": preserves_context,
+                "semantic_frame_protection": context.config.enable_semantic_frame_protection,
             },
             output={
                 "local_bbox": local_bbox,

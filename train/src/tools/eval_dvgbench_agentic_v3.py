@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Per-sample trace JSONL")
     parser.add_argument("--summary-output", help="Summary JSON; defaults beside output")
     parser.add_argument("--initial-predictions", help="Optional cached one-pass JSONL")
+    parser.add_argument(
+        "--require-initial-confidence",
+        action="store_true",
+        help="Reject cached baselines without measured bbox-token confidence",
+    )
     parser.add_argument("--query-field", default="question")
     parser.add_argument("--limit", type=int)
     parser.add_argument(
@@ -73,9 +78,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-token-counts")
     parser.add_argument("--include-raw-output", action="store_true")
 
-    parser.add_argument("--max-child-perception-calls", type=int, default=3)
     parser.add_argument(
+        "--max-specialized-unit-calls",
+        "--max-child-perception-calls",
+        dest="max_child_perception_calls",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--disable-unit",
         "--disable-agent",
+        dest="disable_agent",
         action="append",
         choices=("target", "context", "relation", "zoom"),
         default=[],
@@ -97,6 +110,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zoom-relation-drop-tolerance", type=float, default=0.15)
     parser.add_argument("--zoom-global-drop-tolerance", type=float, default=0.10)
     parser.add_argument("--context-union-margin", type=float, default=1.25)
+    parser.add_argument("--no-constraint-graph", action="store_true")
+    parser.add_argument("--no-semantic-frame-protection", action="store_true")
+    parser.add_argument("--no-false-repair-guard", action="store_true")
+    parser.add_argument("--false-repair-margin", type=float, default=0.02)
     parser.add_argument(
         "--front-behind-axis", choices=("unknown", "y"), default="unknown"
     )
@@ -136,6 +153,10 @@ def build_agent_config(args: argparse.Namespace) -> AgenticConfig:
         zoom_relation_drop_tolerance=args.zoom_relation_drop_tolerance,
         zoom_global_drop_tolerance=args.zoom_global_drop_tolerance,
         context_union_margin=args.context_union_margin,
+        enable_constraint_graph=not args.no_constraint_graph,
+        enable_semantic_frame_protection=not args.no_semantic_frame_protection,
+        enable_false_repair_guard=not args.no_false_repair_guard,
+        false_repair_margin=args.false_repair_margin,
         disabled_agents=set(args.disable_agent),
         feedback_mode=args.feedback_mode,
         enable_escalation=not args.no_escalation,
@@ -152,13 +173,12 @@ def build_agent_config(args: argparse.Namespace) -> AgenticConfig:
 
 
 def build_grounder(args: argparse.Namespace, needs_model: bool):
-    if not args.model_path:
-        if needs_model:
-            raise ValueError(
-                "--model-path is required because at least one grounding or feedback "
-                "model call is not available from cache"
-            )
+    if not needs_model:
         return UnavailableGrounder()
+    if not args.model_path:
+        raise ValueError(
+            "--model-path is required because a grounding or feedback call is uncached"
+        )
     settings = GrounderSettings(
         model_path=args.model_path,
         adapter_path=args.adapter_path,
@@ -177,7 +197,9 @@ def build_grounder(args: argparse.Namespace, needs_model: bool):
     return CoVTGrounder.load(settings)
 
 
-def _public_config(args: argparse.Namespace, agent_config: AgenticConfig) -> dict[str, Any]:
+def _public_config(
+    args: argparse.Namespace, agent_config: AgenticConfig
+) -> dict[str, Any]:
     return {
         "query_field": args.query_field,
         "question_e_used": False,
@@ -206,13 +228,20 @@ def main() -> None:
         if args.initial_predictions
         else None
     )
-    cached = load_cached_predictions(cached_path)
+    cached = load_cached_predictions(
+        cached_path, require_confidence=args.require_initial_confidence
+    )
     method = Method(args.method)
     all_initial_cached = all(sample["sample_id"] in cached for sample in samples)
+    extra_perception_possible = (
+        method != Method.ONE_PASS and args.max_child_perception_calls > 0
+    )
+    base_feedback_possible = args.feedback_mode == "base" and method in {
+        Method.HIERARCHICAL,
+        Method.STATIC_ALL,
+    }
     needs_model = (
-        not all_initial_cached
-        or method != Method.ONE_PASS
-        or args.feedback_mode == "base"
+        not all_initial_cached or extra_perception_possible or base_feedback_possible
     )
     grounder = build_grounder(args, needs_model)
     agent_config = build_agent_config(args)

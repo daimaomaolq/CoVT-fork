@@ -42,6 +42,8 @@ def _apply_zoom_guards(
     by_id: dict[str, Candidate],
     config: AgenticConfig,
 ) -> None:
+    if not config.enable_semantic_frame_protection:
+        return
     for candidate in candidates:
         if candidate.source_agent != "ZoomAgent" or not candidate.parent_candidate_id:
             continue
@@ -89,7 +91,8 @@ def rank_candidates(
         candidate.box_plausibility = box_plausibility(candidate.bbox)
         other_ious = [
             box_iou(candidate.bbox, other.bbox)
-            for other in valid if other.candidate_id != candidate.candidate_id
+            for other in valid
+            if other.candidate_id != candidate.candidate_id
         ]
         candidate.observation_agreement = max(other_ious, default=0.0)
         if candidate.source_agent == "TargetAgent":
@@ -153,7 +156,8 @@ def rank_candidates(
         "top_score": final.fused_score,
         "rejected_candidates": {
             candidate.candidate_id: candidate.rejection_reasons
-            for candidate in valid if not candidate.accepted_by_guard
+            for candidate in valid
+            if not candidate.accepted_by_guard
         },
     }
     return FusionResult(ranked=ranked, final=final, evidence=evidence)

@@ -11,8 +11,8 @@ from typing import Any
 COLUMNS = [
     "Experiment",
     "Method",
-    "Max Child Calls",
-    "Disabled Agents",
+    "Max Specialized Unit Calls",
+    "Disabled Units",
     "mIoU",
     "Acc@0.5",
     "DVGBench_AVG",
@@ -21,7 +21,10 @@ COLUMNS = [
     "Failure Detection Recall",
     "CandidateRecall@2",
     "Avg Calls",
-    "Avg Child Calls",
+    "Avg Specialized Unit Calls",
+    "Initial Latency_ms",
+    "Incremental Agent Latency_ms",
+    "End-to-end Latency_ms",
     "Latency_ms",
     "Latency_P95_ms",
     "Dispatch Rate",
@@ -75,8 +78,8 @@ def flatten(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "Experiment": path.name.removesuffix(".summary.json"),
         "Method": summary.get("method"),
-        "Max Child Calls": config.get("max_child_perception_calls"),
-        "Disabled Agents": ",".join(config.get("disabled_agents", [])),
+        "Max Specialized Unit Calls": config.get("max_child_perception_calls"),
+        "Disabled Units": ",".join(config.get("disabled_agents", [])),
         "mIoU": agentic.get("mIoU"),
         "Acc@0.5": agentic.get("Acc@0.5"),
         "DVGBench_AVG": agentic.get("DVGBench_AVG"),
@@ -85,7 +88,14 @@ def flatten(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
         "Failure Detection Recall": detection.get("Recall"),
         "CandidateRecall@2": candidates.get("CandidateRecall@2"),
         "Avg Calls": agentic.get("Avg Calls"),
-        "Avg Child Calls": agentic.get("Avg Child Calls"),
+        "Avg Specialized Unit Calls": agentic.get(
+            "Avg Specialized Unit Calls", agentic.get("Avg Child Calls")
+        ),
+        "Initial Latency_ms": agentic.get("Initial Latency_ms"),
+        "Incremental Agent Latency_ms": agentic.get("Incremental Agent Latency_ms"),
+        "End-to-end Latency_ms": agentic.get(
+            "End-to-end Latency_ms", agentic.get("Latency_ms")
+        ),
         "Latency_ms": agentic.get("Latency_ms"),
         "Latency_P95_ms": agentic.get("Latency_P95_ms"),
         "Dispatch Rate": agentic.get("Dispatch Rate"),
@@ -105,19 +115,21 @@ def flatten_per_class(path: Path, summary: dict[str, Any]) -> list[dict[str, Any
     for class_name in class_names:
         initial_value = initial.get(class_name)
         final_value = final.get(class_name)
-        rows.append({
-            "Experiment": experiment,
-            "Method": method,
-            "Class": class_name,
-            "Count": counts.get(class_name),
-            "One-pass Acc@0.5": initial_value,
-            "Agentic Acc@0.5": final_value,
-            "Delta Acc@0.5": (
-                float(final_value) - float(initial_value)
-                if initial_value is not None and final_value is not None
-                else None
-            ),
-        })
+        rows.append(
+            {
+                "Experiment": experiment,
+                "Method": method,
+                "Class": class_name,
+                "Count": counts.get(class_name),
+                "One-pass Acc@0.5": initial_value,
+                "Agentic Acc@0.5": final_value,
+                "Delta Acc@0.5": (
+                    float(final_value) - float(initial_value)
+                    if initial_value is not None and final_value is not None
+                    else None
+                ),
+            }
+        )
     return rows
 
 
@@ -187,16 +199,23 @@ def main() -> None:
     write_csv(csv_path, rows, COLUMNS)
     write_csv(per_class_path, per_class_rows, PER_CLASS_COLUMNS)
     write_csv(failure_path, failure_rows, FAILURE_RECOVERY_COLUMNS)
-    json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({
-        "rows": len(rows),
-        "per_class_rows": len(per_class_rows),
-        "failure_rows": len(failure_rows),
-        "csv": str(csv_path),
-        "per_class_csv": str(per_class_path),
-        "failure_csv": str(failure_path),
-        "json": str(json_path),
-    }, indent=2))
+    json_path.write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {
+                "rows": len(rows),
+                "per_class_rows": len(per_class_rows),
+                "failure_rows": len(failure_rows),
+                "csv": str(csv_path),
+                "per_class_csv": str(per_class_path),
+                "failure_csv": str(failure_path),
+                "json": str(json_path),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

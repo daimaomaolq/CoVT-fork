@@ -37,7 +37,9 @@ def attach_evaluation(
     candidate_ious = [box_iou(item.get("bbox"), gt) for item in ranked]
     oracle_iou = max(candidate_ious, default=0.0)
     candidate_recall = {
-        f"CandidateRecall@{k}": float(any(iou >= IOU_THRESHOLD for iou in candidate_ious[:k]))
+        f"CandidateRecall@{k}": float(
+            any(iou >= IOU_THRESHOLD for iou in candidate_ious[:k])
+        )
         for k in (1, 2, 3)
     }
     inference_result["evaluation"] = {
@@ -115,39 +117,39 @@ def _calibration(
         lower = bin_index / bins
         upper = (bin_index + 1) / bins
         selected = [
-            index for index, confidence in enumerate(confidences)
-            if lower <= confidence < upper or (bin_index == bins - 1 and confidence == 1.0)
+            index
+            for index, confidence in enumerate(confidences)
+            if lower <= confidence < upper
+            or (bin_index == bins - 1 and confidence == 1.0)
         ]
         if not selected:
             continue
         bin_accuracy = _mean([float(labels[index]) for index in selected])
         bin_confidence = _mean([confidences[index] for index in selected])
         ece += len(selected) / len(labels) * abs(bin_accuracy - bin_confidence)
-    brier = _mean([
-        (confidence - label) ** 2
-        for label, confidence in zip(labels, confidences)
-    ])
+    brier = _mean(
+        [(confidence - label) ** 2 for label, confidence in zip(labels, confidences)]
+    )
     return {"ECE": ece, "Brier": brier}
 
 
 def _failure_type_recovery(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    names = sorted({
-        diagnosis
-        for row in rows
-        for diagnosis in row["inference"].get("diagnosis", [])
-    })
+    names = sorted(
+        {
+            diagnosis
+            for row in rows
+            for diagnosis in row["inference"].get("diagnosis", [])
+        }
+    )
     table: dict[str, Any] = {}
     for name in names:
         selected = [
             row for row in rows if name in row["inference"].get("diagnosis", [])
         ]
         failures = [
-            row for row in selected
-            if not row["evaluation"]["initial_correct_at_0_5"]
+            row for row in selected if not row["evaluation"]["initial_correct_at_0_5"]
         ]
-        recovered = sum(
-            bool(row["evaluation"]["recovered_at_0_5"]) for row in failures
-        )
+        recovered = sum(bool(row["evaluation"]["recovered_at_0_5"]) for row in failures)
         table[name] = {
             "Count": len(selected),
             "Initial Failures": len(failures),
@@ -166,8 +168,7 @@ def summarize(
     if any("evaluation" not in row for row in rows):
         raise ValueError("All rows must be evaluated before summarization")
     if any(
-        row.get("inference", {}).get("question_e_used") is not False
-        for row in rows
+        row.get("inference", {}).get("question_e_used") is not False for row in rows
     ):
         raise ValueError("Unsafe trace: question_e_used must be explicitly false")
 
@@ -183,9 +184,9 @@ def summarize(
     initial_hit_count = sum(initial_hits)
     final_macro, final_class = _macro_acc50(rows, "final_iou")
     initial_macro, initial_class = _macro_acc50(rows, "initial_iou")
-    class_counts = dict(sorted(Counter(
-        str(row.get("class") or "unknown") for row in rows
-    ).items()))
+    class_counts = dict(
+        sorted(Counter(str(row.get("class") or "unknown") for row in rows).items())
+    )
 
     initial_uncertainties = []
     final_confidences = []
@@ -194,7 +195,9 @@ def summarize(
         initial_score = float(
             inference.get("verification_evidence", {}).get(
                 "initial_fused_confidence",
-                inference.get("initial_candidate", {}).get("bbox_token_confidence", 0.5),
+                inference.get("initial_candidate", {}).get(
+                    "bbox_token_confidence", 0.5
+                ),
             )
         )
         if inference.get("initial_candidate", {}).get("bbox") is None:
@@ -214,46 +217,75 @@ def summarize(
         (not failure) and (not dispatch)
         for failure, dispatch in zip(failures, dispatches)
     )
-    covered = [
-        row for row in rows if row["inference"].get("decision") != "escalate"
-    ]
-    covered_hits = [
-        int(row["evaluation"]["final_correct_at_0_5"]) for row in covered
-    ]
+    covered = [row for row in rows if row["inference"].get("decision") != "escalate"]
+    covered_hits = [int(row["evaluation"]["final_correct_at_0_5"]) for row in covered]
 
     perception_calls = [float(row["cost"].get("perception_calls", 0)) for row in rows]
     executed_calls = [
         float(row["cost"].get("executed_perception_calls", 0)) for row in rows
     ]
-    child_calls = [float(row["cost"].get("child_agent_calls", 0)) for row in rows]
-    latencies = [float(row["cost"].get("latency_ms", 0.0)) for row in rows]
+    unit_calls = [
+        float(
+            row["cost"].get(
+                "specialized_unit_calls", row["cost"].get("child_agent_calls", 0)
+            )
+        )
+        for row in rows
+    ]
+    initial_latencies = [
+        float(row["cost"].get("initial_latency_ms", 0.0)) for row in rows
+    ]
+    incremental_latencies = [
+        float(
+            row["cost"].get(
+                "incremental_agent_latency_ms", row["cost"].get("latency_ms", 0.0)
+            )
+        )
+        for row in rows
+    ]
+    latencies = [
+        float(
+            row["cost"].get("end_to_end_latency_ms", row["cost"].get("latency_ms", 0.0))
+        )
+        for row in rows
+    ]
+    latency_availability = [
+        float(bool(row["cost"].get("latency_available", False))) for row in rows
+    ]
     dispatch_distribution = Counter(
         call["agent"]
         for row in rows
-        for call in row["inference"].get("child_calls", [])
+        for call in row["inference"].get(
+            "unit_calls", row["inference"].get("child_calls", [])
+        )
         if call.get("status") != "skipped"
     )
-    child_effect = {}
+    unit_effect = {}
     for agent_name in sorted(dispatch_distribution):
         invoked = [
-            row for row in rows
+            row
+            for row in rows
             if any(
                 call.get("agent") == agent_name and call.get("status") != "skipped"
-                for call in row["inference"].get("child_calls", [])
+                for call in row["inference"].get(
+                    "unit_calls", row["inference"].get("child_calls", [])
+                )
             )
         ]
-        child_effect[agent_name] = {
+        unit_effect[agent_name] = {
             "Calls": dispatch_distribution[agent_name],
             "Samples Invoked": len(invoked),
             "Invocation Rate": _safe_ratio(len(invoked), len(rows)),
             "Recovered": sum(
                 bool(row["evaluation"]["recovered_at_0_5"]) for row in invoked
             ),
-            "Mean IoU Gain": _mean([
-                float(row["evaluation"]["final_iou"])
-                - float(row["evaluation"]["initial_iou"])
-                for row in invoked
-            ]),
+            "Mean IoU Gain": _mean(
+                [
+                    float(row["evaluation"]["final_iou"])
+                    - float(row["evaluation"]["initial_iou"])
+                    for row in invoked
+                ]
+            ),
         }
 
     oracle_hits = [
@@ -303,7 +335,12 @@ def summarize(
             "Net Recovery Count": recovered - regressed,
             "Avg Calls": _mean(perception_calls),
             "Avg Executed Calls": _mean(executed_calls),
-            "Avg Child Calls": _mean(child_calls),
+            "Avg Specialized Unit Calls": _mean(unit_calls),
+            "Avg Child Calls": _mean(unit_calls),
+            "Initial Latency_ms": _mean(initial_latencies),
+            "Incremental Agent Latency_ms": _mean(incremental_latencies),
+            "End-to-end Latency_ms": _mean(latencies),
+            "Latency Availability Rate": _mean(latency_availability),
             "Latency_ms": _mean(latencies),
             "Latency_P50_ms": quantile(latencies, 0.50),
             "Latency_P95_ms": quantile(latencies, 0.95),
@@ -313,31 +350,33 @@ def summarize(
             "Precision": _safe_ratio(true_positive_dispatch, sum(dispatches)),
             "Recall": _safe_ratio(true_positive_dispatch, initial_failure_count),
             "Specificity": _safe_ratio(true_negative_dispatch, initial_hit_count),
-            "False Dispatch Rate": _safe_ratio(false_positive_dispatch, initial_hit_count),
+            "False Dispatch Rate": _safe_ratio(
+                false_positive_dispatch, initial_hit_count
+            ),
             "AUROC": _auroc(failures, initial_uncertainties),
             "AUPRC": _average_precision(failures, initial_uncertainties),
         },
         "candidate_and_selection": {
-            "CandidateRecall@1": _mean([
-                float(row["evaluation"]["CandidateRecall@1"]) for row in rows
-            ]),
-            "CandidateRecall@2": _mean([
-                float(row["evaluation"]["CandidateRecall@2"]) for row in rows
-            ]),
-            "CandidateRecall@3": _mean([
-                float(row["evaluation"]["CandidateRecall@3"]) for row in rows
-            ]),
+            "CandidateRecall@1": _mean(
+                [float(row["evaluation"]["CandidateRecall@1"]) for row in rows]
+            ),
+            "CandidateRecall@2": _mean(
+                [float(row["evaluation"]["CandidateRecall@2"]) for row in rows]
+            ),
+            "CandidateRecall@3": _mean(
+                [float(row["evaluation"]["CandidateRecall@3"]) for row in rows]
+            ),
             "Candidate Oracle Acc@0.5": _mean(oracle_hits),
             "Selection Success Given Oracle Hit": _safe_ratio(
                 sum(final and oracle for final, oracle in zip(final_hits, oracle_hits)),
                 sum(oracle_hits),
             ),
-            "Mean Oracle IoU": _mean([
-                float(row["evaluation"]["candidate_oracle_iou"]) for row in rows
-            ]),
-            "Mean Oracle Gap IoU": _mean([
-                float(row["evaluation"]["oracle_gap_iou"]) for row in rows
-            ]),
+            "Mean Oracle IoU": _mean(
+                [float(row["evaluation"]["candidate_oracle_iou"]) for row in rows]
+            ),
+            "Mean Oracle Gap IoU": _mean(
+                [float(row["evaluation"]["oracle_gap_iou"]) for row in rows]
+            ),
         },
         "selective_prediction": {
             "Coverage": _safe_ratio(len(covered), len(rows)),
@@ -347,15 +386,22 @@ def summarize(
         "confidence_calibration": calibration,
         "failure_type_recovery": _failure_type_recovery(rows),
         "dispatch_distribution": dict(dispatch_distribution),
-        "child_agent_effect": child_effect,
+        "specialized_unit_effect": unit_effect,
+        "child_agent_effect": unit_effect,
         "human_feedback": {
             "Count": len(feedback_rows),
             "Valid Rate": _safe_ratio(
-                sum(bool(row["inference"]["human_feedback"].get("valid")) for row in feedback_rows),
+                sum(
+                    bool(row["inference"]["human_feedback"].get("valid"))
+                    for row in feedback_rows
+                ),
                 len(feedback_rows),
             ),
             "Fallback Rate": _safe_ratio(
-                sum(bool(row["inference"]["human_feedback"].get("fallback_used")) for row in feedback_rows),
+                sum(
+                    bool(row["inference"]["human_feedback"].get("fallback_used"))
+                    for row in feedback_rows
+                ),
                 len(feedback_rows),
             ),
             "Action Distribution": dict(feedback_actions),

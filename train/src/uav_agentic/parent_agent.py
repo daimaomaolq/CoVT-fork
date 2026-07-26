@@ -19,13 +19,14 @@ from .schema import (
     Candidate,
     Decision,
     Method,
+    QueryConstraintGraph,
     Observation,
     SpatialFrame,
     to_jsonable,
 )
 
 
-SCHEMA_VERSION = "dai-uav-agent-v3"
+SCHEMA_VERSION = "dai-uav-agent-v3.1"
 
 
 def _safe_fusion(
@@ -50,6 +51,45 @@ def _safe_fusion(
             "rejected_candidates": {},
         },
     )
+
+
+def _apply_false_repair_guard(
+    fusion: FusionResult,
+    initial: Candidate,
+    initial_score: float,
+    config: AgenticConfig,
+) -> FusionResult:
+    selected = fusion.final
+    improvement = selected.fused_score - initial_score
+    fusion.evidence["pre_guard_final_candidate_id"] = selected.candidate_id
+    fusion.evidence["pre_guard_score_improvement"] = improvement
+    if (
+        config.enable_false_repair_guard
+        and selected.candidate_id != initial.candidate_id
+        and improvement < config.false_repair_margin
+    ):
+        ranked = [
+            initial,
+            *[
+                candidate
+                for candidate in fusion.ranked
+                if candidate.candidate_id != initial.candidate_id
+            ],
+        ]
+        fusion.ranked = ranked
+        fusion.final = initial
+        initial.fused_score = initial_score
+        next_score = ranked[1].fused_score if len(ranked) > 1 else 0.0
+        initial.competition_margin = max(0.0, initial_score - next_score)
+        fusion.evidence["top_score"] = initial_score
+        fusion.evidence["top_margin"] = initial.competition_margin
+        fusion.evidence["ranked_candidate_ids"] = [item.candidate_id for item in ranked]
+        fusion.evidence["false_repair_guard_applied"] = True
+        fusion.evidence["false_repair_guard_reason"] = "insufficient_unsupervised_gain"
+    else:
+        fusion.evidence["false_repair_guard_applied"] = False
+        fusion.evidence["false_repair_guard_reason"] = None
+    return fusion
 
 
 class HierarchicalParentAgent:
@@ -86,6 +126,7 @@ class HierarchicalParentAgent:
                 model_call=False,
                 perception_call=True,
                 status="cached",
+                latency_ms=cached_initial.latency_ms,
             )
             return cached_initial, call, False
         observation = Observation(
@@ -165,7 +206,9 @@ class HierarchicalParentAgent:
         calls: list[AgentCall],
     ) -> dict[str, Any]:
         result = self.relation_reasoner.run(context)
-        result.call.call_id = f"call_relation_{sum(call.agent == 'RelationAgent' for call in calls)}"
+        result.call.call_id = (
+            f"call_relation_{sum(call.agent == 'RelationAgent' for call in calls)}"
+        )
         calls.append(result.call)
         return result.evidence
 
@@ -195,19 +238,26 @@ class HierarchicalParentAgent:
             diagnosis.append("small_object_uncertain")
 
         target_outputs = [
-            candidate for candidate in candidates
+            candidate
+            for candidate in candidates
             if candidate.source_agent == "TargetAgent"
         ]
-        if "target" in attempted and not any(item.bbox is not None for item in target_outputs):
+        if "target" in attempted and not any(
+            item.bbox is not None for item in target_outputs
+        ):
             diagnosis.append("target_missing")
             unresolved.append("target_missing")
-        if graph.has_context and "context" in attempted and not any(
-            candidate.bbox is not None for candidate in context_candidates
+        if (
+            graph.has_context
+            and "context" in attempted
+            and not any(candidate.bbox is not None for candidate in context_candidates)
         ):
             diagnosis.append("context_missing")
             unresolved.append("context_missing")
 
-        valid_candidates = [candidate for candidate in candidates if candidate.bbox is not None]
+        valid_candidates = [
+            candidate for candidate in candidates if candidate.bbox is not None
+        ]
         best_relation = max(
             (candidate.relation_consistency for candidate in valid_candidates),
             default=0.0,
@@ -215,7 +265,11 @@ class HierarchicalParentAgent:
         relation_verified = "relation" in attempted
         if graph.has_relation and not relation_verified:
             unresolved.append("relation_not_verified")
-        if graph.has_relation and relation_verified and best_relation < self.config.relation_threshold:
+        if (
+            graph.has_relation
+            and relation_verified
+            and best_relation < self.config.relation_threshold
+        ):
             diagnosis.append("relation_wrong")
             unresolved.append("relation_wrong")
         best_global = max(
@@ -223,12 +277,9 @@ class HierarchicalParentAgent:
             default=0.0,
         )
         if (
-            (
-                SpatialFrame.GLOBAL_ABSOLUTE in graph.spatial_frames
-                or SpatialFrame.GLOBAL_ORDER in graph.spatial_frames
-            )
-            and best_global < self.config.global_constraint_threshold
-        ):
+            SpatialFrame.GLOBAL_ABSOLUTE in graph.spatial_frames
+            or SpatialFrame.GLOBAL_ORDER in graph.spatial_frames
+        ) and best_global < self.config.global_constraint_threshold:
             diagnosis.append("global_position_unresolved")
             unresolved.append("global_position_unresolved")
         for item in relation_evidence.get("unresolved", []):
@@ -290,6 +341,16 @@ class HierarchicalParentAgent:
     ) -> dict[str, Any]:
         started = time.perf_counter()
         graph = parse_query_constraints(query)
+        if not self.config.enable_constraint_graph:
+            graph = QueryConstraintGraph(
+                original=query,
+                target=graph.target,
+                attributes=graph.attributes,
+                spatial_frames=[SpatialFrame.LOCAL_ATTRIBUTE],
+                local_target_query=graph.local_target_query,
+                zoom_query=query,
+                parser_version="constraint-graph-disabled-ablation",
+            )
         calls: list[AgentCall] = []
         candidates: list[Candidate] = []
         context_candidates: list[Candidate] = []
@@ -308,24 +369,30 @@ class HierarchicalParentAgent:
         if self.config.method == Method.ONE_PASS:
             fusion = initial_only_fusion
         elif self.config.method == Method.CONFIDENCE_GATED:
-            gate = bool({
-                "parse_risk", "low_token_confidence"
-            }.intersection(routing.preliminary_suspicions))
+            gate = bool(
+                {"parse_risk", "low_token_confidence"}.intersection(
+                    routing.preliminary_suspicions
+                )
+            )
             if gate and self.config.max_child_perception_calls > 0:
                 candidate, call = self._generic_parent_rerun(
-                    image, query, self._next_candidate_id(candidates), 1.10,
+                    image,
+                    query,
+                    self._next_candidate_id(candidates),
+                    1.10,
                     "ConfidenceGatedRerun",
                 )
                 candidates.append(candidate)
                 calls.append(call)
             fusion = _safe_fusion(candidates, graph, self.config)
         elif self.config.method == Method.PARENT_ONLY:
-            verify = bool(
-                routing.preliminary_suspicions or graph.is_position_sensitive
-            )
+            verify = bool(routing.preliminary_suspicions or graph.is_position_sensitive)
             if verify and self.config.max_child_perception_calls > 0:
                 candidate, call = self._generic_parent_rerun(
-                    image, query, self._next_candidate_id(candidates), 1.15,
+                    image,
+                    query,
+                    self._next_candidate_id(candidates),
+                    1.15,
                     "ParentVerification",
                 )
                 candidates.append(candidate)
@@ -407,19 +474,22 @@ class HierarchicalParentAgent:
                             final_relation_context, calls
                         )
                 else:
-                    calls.append(AgentCall(
-                        call_id="call_zoom_skipped",
-                        agent="ZoomAgent",
-                        action="semantic_frame_preserving_zoom",
-                        input={
-                            "seed_candidate_id": preliminary_fusion.final.candidate_id,
-                        },
-                        output={"candidate": None},
-                        evidence={"skipped_reason": "target_identity_not_stable"},
-                        status="skipped",
-                    ))
+                    calls.append(
+                        AgentCall(
+                            call_id="call_zoom_skipped",
+                            agent="ZoomAgent",
+                            action="semantic_frame_preserving_zoom",
+                            input={
+                                "seed_candidate_id": preliminary_fusion.final.candidate_id,
+                            },
+                            output={"candidate": None},
+                            evidence={"skipped_reason": "target_identity_not_stable"},
+                            status="skipped",
+                        )
+                    )
             fusion = _safe_fusion(candidates, graph, self.config)
 
+        fusion = _apply_false_repair_guard(fusion, initial, initial_score, self.config)
         diagnosis, unresolved = self._confirmed_diagnosis(
             initial,
             candidates,
@@ -431,11 +501,11 @@ class HierarchicalParentAgent:
             attempted,
         )
         information_gain = fusion.final.fused_score - initial_score
-        if (
-            self.config.method in {
-                Method.ONE_PASS, Method.CONFIDENCE_GATED, Method.PARENT_ONLY
-            }
-        ):
+        if self.config.method in {
+            Method.ONE_PASS,
+            Method.CONFIDENCE_GATED,
+            Method.PARENT_ONLY,
+        }:
             should_escalate = False
         else:
             should_escalate = bool(unresolved) and self.config.enable_escalation
@@ -452,12 +522,15 @@ class HierarchicalParentAgent:
             decision = Decision.ESCALATE
             stop_reason = (
                 "perception_budget_exhausted"
-                if len([
-                    call for call in calls
-                    if call.perception_call and call.agent in {
-                        "TargetAgent", "ContextAgent", "ZoomAgent"
-                    }
-                ]) >= self.config.max_child_perception_calls
+                if len(
+                    [
+                        call
+                        for call in calls
+                        if call.perception_call
+                        and call.agent in {"TargetAgent", "ContextAgent", "ZoomAgent"}
+                    ]
+                )
+                >= self.config.max_child_perception_calls
                 else "observation_insufficient"
             )
         elif fusion.final.candidate_id == initial.candidate_id:
@@ -483,22 +556,32 @@ class HierarchicalParentAgent:
             if feedback_call:
                 calls.append(feedback_call)
 
-        child_agents = {"TargetAgent", "ContextAgent", "RelationAgent", "ZoomAgent"}
-        child_calls = [
-            call for call in calls
-            if call.agent in child_agents and call.status != "skipped"
+        specialized_units = {
+            "TargetAgent",
+            "ContextAgent",
+            "RelationAgent",
+            "ZoomAgent",
+        }
+        unit_calls = [
+            call
+            for call in calls
+            if call.agent in specialized_units and call.status != "skipped"
         ]
-        child_perception_calls = [
-            call for call in child_calls if call.perception_call
-        ]
+        unit_perception_calls = [call for call in unit_calls if call.perception_call]
         perception_calls = [call for call in calls if call.perception_call]
         executed_perception_calls = [
             call for call in perception_calls if call.model_call
         ]
-        feedback_calls = [
-            call for call in calls if call.agent == "FeedbackGenerator"
-        ]
-        latency_ms = (time.perf_counter() - started) * 1000
+        feedback_calls = [call for call in calls if call.agent == "FeedbackGenerator"]
+        wall_latency_ms = (time.perf_counter() - started) * 1000
+        initial_latency_ms = max(0.0, float(initial.latency_ms))
+        if base_executed:
+            end_to_end_latency_ms = wall_latency_ms
+            incremental_latency_ms = max(0.0, wall_latency_ms - initial_latency_ms)
+        else:
+            incremental_latency_ms = wall_latency_ms
+            end_to_end_latency_ms = initial_latency_ms + incremental_latency_ms
+        latency_available = initial_latency_ms > 0.0
         return {
             "schema_version": SCHEMA_VERSION,
             "sample_id": sample_id,
@@ -531,7 +614,8 @@ class HierarchicalParentAgent:
                     "information_gain": information_gain,
                 },
                 "agent_calls": [to_jsonable(call) for call in calls],
-                "child_calls": [to_jsonable(call) for call in child_calls],
+                "unit_calls": [to_jsonable(call) for call in unit_calls],
+                "child_calls": [to_jsonable(call) for call in unit_calls],
                 "target_candidates": [
                     to_jsonable(candidate) for candidate in candidates
                 ],
@@ -549,18 +633,22 @@ class HierarchicalParentAgent:
             "cost": {
                 "perception_calls": len(perception_calls),
                 "executed_perception_calls": len(executed_perception_calls),
-                "child_perception_calls": len(child_perception_calls),
-                "child_agent_calls": len(child_calls),
-                "relation_calls": sum(
-                    call.agent == "RelationAgent" for call in calls
-                ),
+                "specialized_unit_perception_calls": len(unit_perception_calls),
+                "specialized_unit_calls": len(unit_calls),
+                "child_perception_calls": len(unit_perception_calls),
+                "child_agent_calls": len(unit_calls),
+                "relation_calls": sum(call.agent == "RelationAgent" for call in calls),
                 "feedback_llm_calls": sum(
                     call.agent == "FeedbackGenerator" and call.model_call
                     for call in calls
                 ),
                 "feedback_calls": len(feedback_calls),
-                "dispatch": bool(child_calls) or len(perception_calls) > 1,
+                "dispatch": bool(unit_calls) or len(perception_calls) > 1,
                 "cached_initial": not base_executed,
-                "latency_ms": latency_ms,
+                "initial_latency_ms": initial_latency_ms,
+                "incremental_agent_latency_ms": incremental_latency_ms,
+                "end_to_end_latency_ms": end_to_end_latency_ms,
+                "latency_available": latency_available,
+                "latency_ms": end_to_end_latency_ms,
             },
         }

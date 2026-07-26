@@ -11,7 +11,8 @@ param(
     [string]$AnchorModelId = "['sam','dino']",
     [string]$AnchorPromptMode = "query_tail",
     [string]$AnchorTokenCounts = "",
-    [int]$Limit = 0
+    [int]$Limit = 0,
+    [bool]$Resume = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,10 +27,15 @@ function Invoke-AgenticExperiment {
         [string]$Method,
         [int]$Budget,
         [string[]]$Disabled = @(),
-        [string]$RunFeedbackMode = "off"
+        [string]$RunFeedbackMode = "off",
+        [string[]]$ExtraArgs = @()
     )
     $prediction = Join-Path $OutputDir "$Name.jsonl"
     $summary = Join-Path $OutputDir "$Name.summary.json"
+    if ($Resume -and (Test-Path $prediction) -and (Test-Path $summary)) {
+        Write-Host "[agentic-matrix] skip completed $Name"
+        return
+    }
     $arguments = @(
         $evalScript,
         "--index", $Index,
@@ -42,14 +48,16 @@ function Invoke-AgenticExperiment {
         "--torch-dtype", $TorchDtype,
         "--anchor-model-id", $AnchorModelId,
         "--anchor-prompt-mode", $AnchorPromptMode,
-        "--max-child-perception-calls", "$Budget",
+        "--max-specialized-unit-calls", "$Budget",
         "--feedback-mode", $RunFeedbackMode
     )
+    $arguments += $ExtraArgs
     if ($AdapterPath) {
         $arguments += @("--adapter-path", $AdapterPath)
     }
     if ($InitialPredictions) {
         $arguments += @("--initial-predictions", $InitialPredictions)
+        $arguments += "--require-initial-confidence"
     }
     if ($Limit -gt 0) {
         $arguments += @("--limit", "$Limit")
@@ -58,7 +66,7 @@ function Invoke-AgenticExperiment {
         $arguments += @("--anchor-token-counts", $AnchorTokenCounts)
     }
     foreach ($agent in $Disabled) {
-        $arguments += @("--disable-agent", $agent)
+        $arguments += @("--disable-unit", $agent)
     }
     Write-Host "[agentic-matrix] $Name"
     & $Python @arguments
@@ -68,7 +76,12 @@ function Invoke-AgenticExperiment {
 }
 
 # Main comparison table.
-Invoke-AgenticExperiment "main_one_pass" "one_pass" 0 @() "off"
+if (-not $InitialPredictions) {
+    Invoke-AgenticExperiment "main_one_pass" "one_pass" 0 @() "off"
+    $InitialPredictions = Join-Path $OutputDir "main_one_pass.jsonl"
+} else {
+    Invoke-AgenticExperiment "main_one_pass" "one_pass" 0 @() "off"
+}
 Invoke-AgenticExperiment "main_confidence_gated" "confidence_gated" 1 @() "off"
 Invoke-AgenticExperiment "main_parent_only" "parent_only" 1 @() "off"
 Invoke-AgenticExperiment "main_static_all" "static_all" 3 @() "off"
@@ -80,8 +93,13 @@ Invoke-AgenticExperiment "ablation_without_context" "hierarchical" 3 @("context"
 Invoke-AgenticExperiment "ablation_without_relation" "hierarchical" 3 @("relation") $FeedbackMode
 Invoke-AgenticExperiment "ablation_without_zoom" "hierarchical" 3 @("zoom") $FeedbackMode
 
+# Mechanism ablations.
+Invoke-AgenticExperiment "ablation_without_constraint_graph" "hierarchical" 3 @() $FeedbackMode @("--no-constraint-graph")
+Invoke-AgenticExperiment "ablation_without_semantic_frame_protection" "hierarchical" 3 @() $FeedbackMode @("--no-semantic-frame-protection")
+Invoke-AgenticExperiment "ablation_without_false_repair_guard" "hierarchical" 3 @() $FeedbackMode @("--no-false-repair-guard")
+
 # Cost-accuracy curve; Relation Agent is reasoning-only and does not consume a perception call.
-foreach ($budget in 0, 1, 2, 3) {
+foreach ($budget in 0, 1, 2) {
     Invoke-AgenticExperiment "budget_k$budget" "hierarchical" $budget @() $FeedbackMode
 }
 

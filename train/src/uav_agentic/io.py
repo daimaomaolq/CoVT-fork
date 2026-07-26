@@ -20,7 +20,9 @@ def read_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as error:
-                raise ValueError(f"Invalid JSONL at {path}:{line_number}: {error}") from error
+                raise ValueError(
+                    f"Invalid JSONL at {path}:{line_number}: {error}"
+                ) from error
             if not isinstance(row, dict):
                 raise ValueError(f"Expected an object at {path}:{line_number}")
             rows.append(row)
@@ -53,14 +55,19 @@ def inference_input_from_row(
         raise ValueError(f"Missing non-empty query field {query_field!r}")
     if normalized_field == "query":
         provenance = " ".join(
-            str(row.get(key) or "") for key in ("query_rule", "query_version", "task_tag")
+            str(row.get(key) or "")
+            for key in ("query_rule", "query_version", "task_tag")
         ).lower()
         if "question_e" in provenance:
-            raise ValueError("The generic query field is derived from forbidden question_e")
+            raise ValueError(
+                "The generic query field is derived from forbidden question_e"
+            )
         oracle_text = str(row.get("question_e") or "").strip()
         ordinary_text = str(row.get("question") or "").strip()
         if oracle_text and query == oracle_text and query != ordinary_text:
-            raise ValueError("The generic query field exactly matches forbidden question_e")
+            raise ValueError(
+                "The generic query field exactly matches forbidden question_e"
+            )
     sample_id = str(row.get("sample_id") or row.get("id") or "").strip()
     image = str(row.get("image") or row.get("image_path") or "").strip()
     if not sample_id:
@@ -108,8 +115,6 @@ def _has_prediction_provenance(row: dict[str, Any]) -> bool:
         "prediction",
         "raw_output",
         "parse_ok",
-        "iou",
-        "evaluation",
         "bbox_token_confidence",
         "generation_confidence",
     }
@@ -120,19 +125,33 @@ def candidate_from_prediction(row: dict[str, Any], query: str = "") -> Candidate
     candidate_record = _nested_get(row, ("inference", "initial_candidate"))
     if not isinstance(candidate_record, dict):
         candidate_record = {}
-    bbox = _first_not_none((
-        candidate_record.get("bbox"),
-        row.get("pred_bbox"),
-        row.get("bbox"),
-        row.get("final_bbox"),
-        _nested_get(row, ("inference", "final_bbox")),
-    ))
-    confidence = _first_not_none((
-        row.get("bbox_token_confidence"),
-        row.get("generation_confidence"),
-        candidate_record.get("bbox_token_confidence"),
-    ))
-    confidence_available = confidence is not None
+    bbox = _first_not_none(
+        (
+            candidate_record.get("bbox"),
+            row.get("pred_bbox"),
+            row.get("bbox"),
+            row.get("final_bbox"),
+            _nested_get(row, ("inference", "final_bbox")),
+        )
+    )
+    confidence = _first_not_none(
+        (
+            row.get("bbox_token_confidence"),
+            row.get("generation_confidence"),
+            candidate_record.get("bbox_token_confidence"),
+        )
+    )
+    explicit_availability = _first_not_none(
+        (
+            row.get("confidence_available"),
+            candidate_record.get("confidence_available"),
+        )
+    )
+    confidence_available = (
+        bool(explicit_availability)
+        if explicit_availability is not None
+        else confidence is not None
+    )
     if confidence is None:
         confidence = 0.5
     parsed_bbox = None
@@ -158,10 +177,24 @@ def candidate_from_prediction(row: dict[str, Any], query: str = "") -> Candidate
         confidence_available=confidence_available,
         bbox_token_count=int(candidate_record.get("bbox_token_count") or 0),
         raw_output=raw_output,
+        latency_ms=float(
+            _first_not_none(
+                (
+                    candidate_record.get("latency_ms"),
+                    _nested_get(row, ("cost", "initial_latency_ms")),
+                    row.get("latency_ms"),
+                    0.0,
+                )
+            )
+            or 0.0
+        ),
     )
 
 
-def load_cached_predictions(path: Path | None) -> dict[str, dict[str, Any]]:
+def load_cached_predictions(
+    path: Path | None,
+    require_confidence: bool = False,
+) -> dict[str, dict[str, Any]]:
     if path is None:
         return {}
     result: dict[str, dict[str, Any]] = {}
@@ -174,6 +207,13 @@ def load_cached_predictions(path: Path | None) -> dict[str, dict[str, Any]]:
                 f"Cached row {sample_id} in {path} has no prediction provenance; "
                 "refusing a possible dataset-index/GT row"
             )
+        if require_confidence:
+            candidate = candidate_from_prediction(row)
+            if not candidate.confidence_available or candidate.bbox_token_count <= 0:
+                raise ValueError(
+                    f"Cached prediction {sample_id} in {path} has no measured bbox-token confidence. "
+                    "Generate the formal one-pass cache before running the agent matrix."
+                )
         if sample_id in result:
             raise ValueError(f"Duplicate cached prediction for sample_id={sample_id}")
         result[sample_id] = row

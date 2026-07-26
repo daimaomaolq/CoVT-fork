@@ -8,16 +8,16 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 
 旧的 `eval_dvgbench_agentic_inference.py` 与 `eval_dvgbench_hierarchical_*.py` 是早期原型，不用于正式实验。
 
-## 1. 最终父子 Agent 分工
+## 1. 最终层级感知 Agent 与专用功能单元
 
-系统只有四类子 Agent，不包含 Query Rewrite Agent：
+系统是一个负责诊断、路由与决策的层级感知 Agent，按需调用四类专用功能单元；不是多个自治 Agent 协作，也不包含 Query Rewrite 单元：
 
 - `TargetAgent`：依据 target 和 attribute 在全图重新搜索目标候选。其结果仍须经过完整 query 约束验证，不能直接成为答案。
 - `ContextAgent`：定位 context 区域。context bbox 只作为关系证据，不会混入最终 target bbox 候选。
 - `RelationAgent`：对 target/context 配对、全局位置和顺序约束进行排序；它是无需额外视觉模型调用的推理 Agent。
 - `ZoomAgent`：对身份已稳定的候选执行 crop-based zoom-in，重新调用同一个 grounding backbone，并将局部 bbox 映射回原图。
 
-父 Agent 负责 query constraint graph、无监督可靠性检查、依赖感知路由、全局竞争、候选加权融合、停止和升级。Target、Context、Zoom 是二次感知执行者，Relation 是结构化关系推理者；最终 bbox 只能由父 Agent 选择。
+层级感知 Agent 负责 query constraint graph、无监督可靠性检查、依赖感知路由、全局竞争、候选加权融合、停止和升级。Target、Context、Zoom 是二次感知单元，Relation 是结构化关系推理单元；它们没有独立目标、长期状态或自治决策权，最终 bbox 只能由控制器选择。
 
 ## 2. 按需派发与候选权重
 
@@ -27,10 +27,10 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 - bbox token confidence；
 - box area 和 shape plausibility；
 - query 是否含有 context、relation、全局方位、顺序、朝向或时序语言；
-- 最大 child perception call 预算；
+- 最大 specialized-unit perception call 预算；
 - 消融实验禁用的 Agent。
 
-简单、高置信的 target-only query 可以不调用任何子 Agent。关系 query 通常先调用 Target 和 Context，再由 Relation 排序；仅有小目标或粗框风险时才进入 Zoom。`static_all` 只调用对当前 query 适用的全部 Agent，用作固定派发对照。
+简单、高置信的 target-only query 可以不调用任何专用单元。关系 query 通常先调用 Target 和 Context，再由 Relation 排序；仅有小目标或粗框风险时才进入 Zoom。`static_all` 固定调用对当前 query 适用的全部单元，用作非自适应派发对照。
 
 候选融合不是 bbox 平均或无条件投票。默认权重为：
 
@@ -79,12 +79,13 @@ sample_id, image, query, class
 - `inference.diagnosis`；
 - `inference.action_trace`；
 - `inference.confidence`；
-- `inference.child_calls`；
+- `inference.unit_calls`；
+- `inference.child_calls` 仅作为兼容早期实验协议的同值别名；
 - constraint graph、routing plan、target/context candidates 和 verification evidence；
 - `decision = accept | refine | escalate` 与 `stop_reason`；
 - 预算耗尽或观测不足时的 `human_feedback`；
 - 独立的 `evaluation`，其中才允许出现 GT 和 IoU；
-- `cost` 中的逻辑/实际 perception calls、child calls、latency 和 dispatch。
+- `cost` 中的逻辑/实际 perception calls、specialized unit calls、初始/增量/端到端 latency 和 dispatch。
 
 `--feedback-mode base` 会在停止后调用去除 LoRA adapter 的同一基座生成自然语言反馈。动作由确定性安全策略先选定，基座只负责叙述，不能改变动作或给出数值飞行控制指令；不合规输出自动回退到模板。建议可包括保持上下文的降低高度/高分辨率观察、更宽上下文、侧向或斜视重观察、时序观察和人工复核。
 
@@ -93,9 +94,9 @@ sample_id, image, query, class
 ```text
 one_pass          原始 CoVT-SegDINO 一次 grounding，无 Agent
 confidence_gated  parse/低 token confidence 时做一次 transformed rerun
-parent_only       父级规则验证加一次通用 transformed rerun，无专用子 Agent
-static_all        固定调用全部适用子 Agent
-hierarchical      诊断和预算驱动的父子层级推理
+parent_only       单控制器规则验证加一次通用 transformed rerun，无专用单元
+static_all        固定调用全部适用专用单元
+hierarchical      诊断和预算驱动的层级主动感知推理
 ```
 
 PowerShell：
@@ -116,9 +117,9 @@ bash train/scripts/run_dvgbench_agentic_v3_matrix.sh \
   <index.jsonl> <base_model> <output_dir> <lora_adapter> <existing_one_pass_predictions.jsonl>
 ```
 
-使用 `InitialPredictions` 可保证各方法共享完全相同的 one-pass 初始框。缓存没有 bbox token confidence 时会在 trace 中标为 unavailable；正式失败检测置信度实验应使用带 token confidence 的新 one-pass 输出。
+使用 `InitialPredictions` 可保证各方法共享完全相同的 one-pass 初始框。矩阵会用 `--require-initial-confidence` 拒绝缺少实测 bbox-token confidence 的旧缓存；省略第五个参数时，脚本会先生成一次正式 one-pass 缓存并供后续全部方法复用。
 
-矩阵脚本自动运行主对比、四个子 Agent 消融和 K=0/1/2/3 成本曲线，并生成 `agentic_matrix.csv/json`。
+矩阵脚本自动运行主对比、四个专用单元消融、约束图/语义坐标保护/防误修复三项机制消融，以及 K=0/1/2 成本点；主方法本身即 K=3，避免重复全量推理。
 
 矩阵脚本默认使用 `AnchorModelId=['sam','dino']` 和 `AnchorPromptMode=query_tail`，与现有 CoVT-SegDINO one-pass 协议一致；只有训练配置不同才应覆盖这两个参数。
 
@@ -128,9 +129,9 @@ bash train/scripts/run_dvgbench_agentic_v3_matrix.sh \
 - 恢复：Recovery@0.5、False Repair Rate、Regression@0.5、Net Recovery Count；
 - 失败检测：Precision、Recall、Specificity、False Dispatch Rate、AUROC、AUPRC；
 - 候选与选择：CandidateRecall@1/2/3、Candidate Oracle Acc@0.5、Selection Success Given Oracle Hit、Oracle Gap；
-- 成本：Avg Calls、Avg Executed Calls、Avg Child Calls、mean/P50/P95 latency、Dispatch Rate；
+- 成本：Avg Calls、Avg Executed Calls、Avg Specialized Unit Calls、初始/增量/端到端 mean/P50/P95 latency、Dispatch Rate；
 - 选择性预测：Coverage、Selective Acc@0.5、Escalation Rate；
-- 其他：confidence ECE/Brier、failure-type recovery、dispatch distribution、每个子 Agent 的调用和 IoU gain、反馈有效率与回退率。
+- 其他：confidence ECE/Brier、failure-type recovery、dispatch distribution、每个专用单元的调用和 IoU gain、反馈有效率与回退率。
 
 “召回率”被拆成失败检测 Recall 与 CandidateRecall@K，避免把 Agent 是否发现失败和是否生成正确候选混为同一指标。
 
@@ -142,4 +143,4 @@ python -m unittest discover -s train/tests -v
 python -m compileall train/src/uav_agentic train/src/tools/eval_dvgbench_agentic_v3.py
 ```
 
-测试覆盖数据隔离、缓存 provenance、按需派发、无 Query Rewrite 子 Agent、关系排序、Zoom 坐标语义、one-pass 缓存、恢复路径、时序不确定性反馈、正式 CLI 和指标汇总。
+测试覆盖数据隔离、缓存 provenance、按需派发、无 Query Rewrite 单元、关系排序、Zoom 坐标语义、one-pass 缓存与延迟、恢复路径、防误修复、关键机制消融、时序不确定性反馈、正式 CLI 和指标汇总。
