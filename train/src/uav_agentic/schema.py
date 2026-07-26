@@ -163,6 +163,10 @@ class AgenticConfig:
     enable_semantic_frame_protection: bool = True
     enable_false_repair_guard: bool = True
     false_repair_margin: float = 0.02
+    replacement_confidence_threshold: float = 0.60
+    replacement_confidence_gain_threshold: float = 0.15
+    replacement_cross_view_iou_threshold: float = 0.25
+    replacement_constraint_gain_threshold: float = 0.15
     front_behind_axis: str = "unknown"
     weight_full_confidence: float = 0.30
     weight_shape: float = 0.10
@@ -192,6 +196,16 @@ class AgenticConfig:
             "zoom_relation_drop_tolerance": self.zoom_relation_drop_tolerance,
             "zoom_global_drop_tolerance": self.zoom_global_drop_tolerance,
             "false_repair_margin": self.false_repair_margin,
+            "replacement_confidence_threshold": (self.replacement_confidence_threshold),
+            "replacement_confidence_gain_threshold": (
+                self.replacement_confidence_gain_threshold
+            ),
+            "replacement_cross_view_iou_threshold": (
+                self.replacement_cross_view_iou_threshold
+            ),
+            "replacement_constraint_gain_threshold": (
+                self.replacement_constraint_gain_threshold
+            ),
         }
         invalid = {
             name: value for name, value in bounded.items() if not 0 <= value <= 1

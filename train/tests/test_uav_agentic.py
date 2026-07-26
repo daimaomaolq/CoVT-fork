@@ -161,6 +161,29 @@ class QueryRoutingTests(unittest.TestCase):
         initial = cached_candidate([0.1, 0.1, 0.12, 0.12], confidence=0.2)
         plan = DependencyAwareRouter().plan(initial, graph, AgenticConfig())
         self.assertNotIn("rewrite", plan.perception_actions)
+        self.assertEqual(graph.local_target_query, "small red car")
+
+    def test_target_clause_excludes_relation_context_attributes(self):
+        graph = parse_query_constraints(
+            "The grey car parked in front of the yellow fence"
+        )
+        self.assertEqual(graph.target, "car")
+        self.assertEqual(graph.attributes, ["grey", "parked"])
+        self.assertEqual(graph.context, "yellow fence")
+        self.assertEqual(graph.local_target_query, "grey car parked")
+
+    def test_implicit_target_query_preserves_semantic_clause(self):
+        farmland = parse_query_constraints("Farmland waiting to be harvested")
+        self.assertEqual(farmland.target, "farmland")
+        self.assertEqual(
+            farmland.local_target_query, "Farmland waiting to be harvested"
+        )
+        relation = parse_query_constraints(
+            "The attacking player behind the defensive player"
+        )
+        self.assertEqual(relation.target, "player")
+        self.assertEqual(relation.local_target_query, "attacking player")
+        self.assertEqual(relation.context, "defensive player")
 
 
 class RelationAndZoomTests(unittest.TestCase):

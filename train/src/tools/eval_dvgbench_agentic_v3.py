@@ -115,6 +115,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-semantic-frame-protection", action="store_true")
     parser.add_argument("--no-false-repair-guard", action="store_true")
     parser.add_argument("--false-repair-margin", type=float, default=0.02)
+    parser.add_argument("--replacement-confidence-threshold", type=float, default=0.60)
+    parser.add_argument(
+        "--replacement-confidence-gain-threshold", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--replacement-cross-view-iou-threshold", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--replacement-constraint-gain-threshold", type=float, default=0.15
+    )
     parser.add_argument(
         "--front-behind-axis", choices=("unknown", "y"), default="unknown"
     )
@@ -158,6 +168,16 @@ def build_agent_config(args: argparse.Namespace) -> AgenticConfig:
         enable_semantic_frame_protection=not args.no_semantic_frame_protection,
         enable_false_repair_guard=not args.no_false_repair_guard,
         false_repair_margin=args.false_repair_margin,
+        replacement_confidence_threshold=(args.replacement_confidence_threshold),
+        replacement_confidence_gain_threshold=(
+            args.replacement_confidence_gain_threshold
+        ),
+        replacement_cross_view_iou_threshold=(
+            args.replacement_cross_view_iou_threshold
+        ),
+        replacement_constraint_gain_threshold=(
+            args.replacement_constraint_gain_threshold
+        ),
         disabled_agents=set(args.disable_agent),
         feedback_mode=args.feedback_mode,
         enable_escalation=not args.no_escalation,

@@ -95,13 +95,24 @@ def rank_candidates(
             if other.candidate_id != candidate.candidate_id
         ]
         candidate.observation_agreement = max(other_ious, default=0.0)
-        if candidate.source_agent == "TargetAgent":
-            candidate.target_consistency = 1.0
-        elif target_specialists:
+        if target_specialists:
+            if candidate.source_agent == "TargetAgent":
+                support_candidates = [
+                    other
+                    for other in valid
+                    if other.candidate_id != candidate.candidate_id
+                ]
+            else:
+                support_candidates = target_specialists
             candidate.target_consistency = max(
-                box_iou(candidate.bbox, specialist.bbox)
-                for specialist in target_specialists
+                (
+                    box_iou(candidate.bbox, support.bbox)
+                    for support in support_candidates
+                ),
+                default=0.5,
             )
+        else:
+            candidate.target_consistency = 0.5
         if candidate.candidate_id in ordinal_scores:
             candidate.global_constraint_score = ordinal_scores[candidate.candidate_id]
         elif SpatialFrame.GLOBAL_ABSOLUTE in graph.spatial_frames:

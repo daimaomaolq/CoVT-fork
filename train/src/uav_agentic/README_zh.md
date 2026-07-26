@@ -44,7 +44,18 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 - ambiguity penalty
 ```
 
-正权重自动归一化。权重和阈值只能在验证集确定，不能用 DVGBench test GT 调参。
+正权重自动归一化。`TargetAgent` 的来源身份不会自动获得 1.0 target consistency；target consistency 由它与基础框、Zoom 视图及其他候选的一致性计算，避免专用单元自证。
+
+有效 initial bbox 默认受 evidence-supported replacement guard 保护。非初始候选只有同时满足可比分数增益，并获得下列至少一种独立证据时，才允许成为 final bbox：
+
+- bbox token confidence 达到 `replacement_confidence_threshold`，且相对 initial 的增益达到 `replacement_confidence_gain_threshold`；
+- Target 与其 crop-based Zoom 结果满足跨视图 IoU 和置信度确认；
+- relation consistency 相对 initial 获得显著增益；
+- global constraint consistency 相对 initial 获得显著增益。
+
+trace 在 `verification_evidence.fusion` 中记录 `comparable_initial_score`、`replacement_confidence_gain`、`replacement_support_evidence`、`cross_view_partner_id` 与 guard 原因。确定性 query decomposition 保留关系词之前的完整目标子句，并仅从目标子句提取属性，防止 context 属性泄漏；这不是 Query Rewrite 单元。
+
+权重和阈值只能在验证集确定，不能用 DVGBench test GT 调参。
 
 ## 3. Zoom 的坐标与语义安全
 

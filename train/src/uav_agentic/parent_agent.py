@@ -60,13 +60,86 @@ def _apply_false_repair_guard(
     config: AgenticConfig,
 ) -> FusionResult:
     selected = fusion.final
-    improvement = selected.fused_score - initial_score
-    fusion.evidence["pre_guard_final_candidate_id"] = selected.candidate_id
-    fusion.evidence["pre_guard_score_improvement"] = improvement
+    comparable_initial_score = initial.fused_score
+    score_improvement = selected.fused_score - comparable_initial_score
+    confidence_gain = (
+        selected.bbox_token_confidence - initial.bbox_token_confidence
+        if selected.confidence_available and initial.confidence_available
+        else 0.0
+    )
+    evidence: list[str] = []
+    if initial.bbox is None:
+        evidence.append("initial_parse_failed")
+    if (
+        selected.confidence_available
+        and initial.confidence_available
+        and selected.bbox_token_confidence >= config.replacement_confidence_threshold
+        and confidence_gain >= config.replacement_confidence_gain_threshold
+    ):
+        evidence.append("strong_token_confidence_gain")
+
+    by_id = {candidate.candidate_id: candidate for candidate in fusion.ranked}
+    cross_view_partner_id: str | None = None
+    if selected.source_agent == "TargetAgent":
+        for candidate in fusion.ranked:
+            if (
+                candidate.source_agent == "ZoomAgent"
+                and candidate.parent_candidate_id == selected.candidate_id
+                and candidate.bbox is not None
+                and selected.bbox is not None
+                and box_iou(candidate.bbox, selected.bbox)
+                >= config.replacement_cross_view_iou_threshold
+                and candidate.bbox_token_confidence >= selected.bbox_token_confidence
+            ):
+                cross_view_partner_id = candidate.candidate_id
+                break
+    elif selected.source_agent == "ZoomAgent" and selected.parent_candidate_id:
+        parent = by_id.get(selected.parent_candidate_id)
+        if (
+            parent is not None
+            and parent.source_agent == "TargetAgent"
+            and parent.bbox is not None
+            and selected.bbox is not None
+            and box_iou(parent.bbox, selected.bbox)
+            >= config.replacement_cross_view_iou_threshold
+            and selected.bbox_token_confidence >= parent.bbox_token_confidence
+        ):
+            cross_view_partner_id = parent.candidate_id
+    if cross_view_partner_id is not None:
+        evidence.append("cross_view_zoom_confirmation")
+
+    relation_gain = selected.relation_consistency - initial.relation_consistency
+    if (
+        selected.relation_consistency >= config.relation_threshold
+        and relation_gain >= config.replacement_constraint_gain_threshold
+    ):
+        evidence.append("relation_constraint_gain")
+    global_gain = selected.global_constraint_score - initial.global_constraint_score
+    if (
+        selected.global_constraint_score >= config.global_constraint_threshold
+        and global_gain >= config.replacement_constraint_gain_threshold
+    ):
+        evidence.append("global_constraint_gain")
+
+    replacement_supported = bool(evidence) and (
+        initial.bbox is None or score_improvement >= config.false_repair_margin
+    )
+    fusion.evidence.update(
+        {
+            "pre_guard_final_candidate_id": selected.candidate_id,
+            "pre_perception_initial_score": initial_score,
+            "comparable_initial_score": comparable_initial_score,
+            "pre_guard_score_improvement": score_improvement,
+            "replacement_confidence_gain": confidence_gain,
+            "replacement_support_evidence": evidence,
+            "cross_view_partner_id": cross_view_partner_id,
+            "replacement_supported": replacement_supported,
+        }
+    )
     if (
         config.enable_false_repair_guard
         and selected.candidate_id != initial.candidate_id
-        and improvement < config.false_repair_margin
+        and not replacement_supported
     ):
         ranked = [
             initial,
@@ -78,14 +151,17 @@ def _apply_false_repair_guard(
         ]
         fusion.ranked = ranked
         fusion.final = initial
-        initial.fused_score = initial_score
         next_score = ranked[1].fused_score if len(ranked) > 1 else 0.0
-        initial.competition_margin = max(0.0, initial_score - next_score)
-        fusion.evidence["top_score"] = initial_score
+        initial.competition_margin = max(0.0, comparable_initial_score - next_score)
+        fusion.evidence["top_score"] = comparable_initial_score
         fusion.evidence["top_margin"] = initial.competition_margin
         fusion.evidence["ranked_candidate_ids"] = [item.candidate_id for item in ranked]
         fusion.evidence["false_repair_guard_applied"] = True
-        fusion.evidence["false_repair_guard_reason"] = "insufficient_unsupervised_gain"
+        fusion.evidence["false_repair_guard_reason"] = (
+            "missing_independent_replacement_evidence"
+            if score_improvement >= config.false_repair_margin
+            else "insufficient_comparable_score_gain"
+        )
     else:
         fusion.evidence["false_repair_guard_applied"] = False
         fusion.evidence["false_repair_guard_reason"] = None

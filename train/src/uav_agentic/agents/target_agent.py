@@ -28,7 +28,9 @@ class TargetAgent:
             self.name,
             observation,
         )
-        candidate.target_consistency = 1.0 if candidate.bbox is not None else 0.0
+        # A specialist cannot self-certify semantic correctness; fusion derives
+        # target consistency from agreement with independent observations.
+        candidate.target_consistency = 0.5 if candidate.bbox is not None else 0.0
         call = AgentCall(
             call_id=f"call_{candidate_id}",
             agent=self.name,

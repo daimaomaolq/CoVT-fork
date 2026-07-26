@@ -10,7 +10,7 @@ from PIL import Image
 
 from uav_agentic.agents.base import AgentContext
 from uav_agentic.agents.zoom_agent import ZoomAgent
-from uav_agentic.fusion import FusionResult
+from uav_agentic.fusion import FusionResult, rank_candidates
 from uav_agentic.io import load_cached_predictions
 from uav_agentic.grounder import CoVTGrounder
 from uav_agentic.parent_agent import HierarchicalParentAgent, _apply_false_repair_guard
@@ -145,6 +145,66 @@ class ReleaseAuditTests(unittest.TestCase):
         )
         self.assertEqual(guarded.final.candidate_id, "c00")
         self.assertTrue(guarded.evidence["false_repair_guard_applied"])
+
+    def test_false_repair_guard_accepts_strong_confidence_gain(self):
+        initial = make_candidate("c00", confidence=0.40)
+        initial.fused_score = 0.50
+        refined = make_candidate("c01", [0.5, 0.5, 0.6, 0.6], confidence=0.65)
+        refined.fused_score = 0.70
+        fusion = FusionResult([refined, initial], refined, {})
+        guarded = _apply_false_repair_guard(
+            fusion,
+            initial,
+            0.30,
+            AgenticConfig(),
+        )
+        self.assertEqual(guarded.final.candidate_id, "c01")
+        self.assertEqual(
+            guarded.evidence["replacement_support_evidence"],
+            ["strong_token_confidence_gain"],
+        )
+        self.assertAlmostEqual(guarded.evidence["comparable_initial_score"], 0.50)
+
+    def test_false_repair_guard_accepts_independent_zoom_confirmation(self):
+        initial = make_candidate("c00", confidence=0.55)
+        initial.fused_score = 0.50
+        refined = make_candidate("c01", [0.4, 0.4, 0.6, 0.6], confidence=0.45)
+        refined.fused_score = 0.65
+        zoom = Candidate(
+            candidate_id="c02",
+            bbox=[0.41, 0.41, 0.61, 0.61],
+            source_agent="ZoomAgent",
+            query_used="the car",
+            observation=Observation("zoom", "crop_zoom"),
+            bbox_token_confidence=0.55,
+            bbox_token_count=4,
+            parent_candidate_id="c01",
+        )
+        zoom.fused_score = 0.60
+        fusion = FusionResult([refined, zoom, initial], refined, {})
+        guarded = _apply_false_repair_guard(
+            fusion,
+            initial,
+            0.30,
+            AgenticConfig(),
+        )
+        self.assertEqual(guarded.final.candidate_id, "c01")
+        self.assertIn(
+            "cross_view_zoom_confirmation",
+            guarded.evidence["replacement_support_evidence"],
+        )
+        self.assertEqual(guarded.evidence["cross_view_partner_id"], "c02")
+
+    def test_target_candidate_cannot_self_certify_in_fusion(self):
+        initial = make_candidate("c00", confidence=0.60)
+        refined = make_candidate("c01", [0.5, 0.5, 0.6, 0.6], confidence=0.60)
+        fusion = rank_candidates(
+            [initial, refined],
+            parse_query_constraints("the car"),
+            AgenticConfig(),
+        )
+        self.assertEqual(fusion.final.candidate_id, "c00")
+        self.assertEqual(initial.target_consistency, refined.target_consistency)
 
     def test_zoom_ablation_uses_naive_crop_query(self):
         graph = parse_query_constraints("the car in the upper left")

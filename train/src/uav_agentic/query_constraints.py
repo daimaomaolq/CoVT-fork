@@ -6,18 +6,83 @@ from .schema import QueryConstraintGraph, SpatialFrame
 
 
 TARGET_LEXICON = (
-    "three-wheeled vehicle", "traffic light", "tennis court", "parking lot",
-    "construction vehicle", "motorcycle", "motorbike", "bicycle", "tricycle",
-    "airplane", "aircraft", "plane", "helicopter", "vehicle", "truck", "lorry",
-    "bus", "van", "car", "person", "pedestrian", "man", "woman", "child",
-    "worker", "cyclist", "rider", "boat", "ship", "building", "house", "tent",
-    "container", "excavator", "tractor", "crosswalk", "zebra crossing",
+    "three-wheeled vehicle",
+    "traffic light",
+    "tennis court",
+    "parking lot",
+    "construction vehicle",
+    "motorcycle",
+    "motorbike",
+    "bicycle",
+    "tricycle",
+    "airplane",
+    "aircraft",
+    "plane",
+    "helicopter",
+    "vehicle",
+    "truck",
+    "lorry",
+    "bus",
+    "van",
+    "car",
+    "person",
+    "pedestrian",
+    "man",
+    "woman",
+    "child",
+    "worker",
+    "cyclist",
+    "rider",
+    "boat",
+    "ship",
+    "building",
+    "house",
+    "tent",
+    "container",
+    "excavator",
+    "tractor",
+    "crosswalk",
+    "zebra crossing",
+    "supermarket",
+    "farmland",
+    "land",
+    "formation",
+    "place",
+    "area",
+    "region",
+    "field",
+    "stage",
+    "road",
+    "street",
+    "bridge",
+    "viaduct",
+    "fence",
+    "playground",
+    "goal",
+    "player",
 )
 
 ATTRIBUTE_TERMS = (
-    "white", "black", "red", "blue", "green", "yellow", "orange", "gray",
-    "grey", "large", "small", "tiny", "parked", "moving", "standing",
-    "illegal", "three-wheeled", "two-wheeled", "striped", "damaged",
+    "white",
+    "black",
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "orange",
+    "gray",
+    "grey",
+    "large",
+    "small",
+    "tiny",
+    "parked",
+    "moving",
+    "standing",
+    "illegal",
+    "three-wheeled",
+    "two-wheeled",
+    "striped",
+    "damaged",
 )
 
 RELATION_PATTERNS = (
@@ -33,10 +98,23 @@ RELATION_PATTERNS = (
 )
 
 CONTEXT_SPLIT_PATTERNS = (
-    r"\bin front of\b", r"\bahead of\b", r"\bleft of\b", r"\bright of\b",
-    r"\bnext to\b", r"\bclose to\b", r"\bparked on\b", r"\bstanding on\b",
-    r"\bbehind\b", r"\bbeside\b", r"\badjacent to\b", r"\binside\b",
-    r"\bwithin\b", r"\babove\b", r"\bbelow\b", r"\bunder\b", r"\bnear\b",
+    r"\bin front of\b",
+    r"\bahead of\b",
+    r"\bleft of\b",
+    r"\bright of\b",
+    r"\bnext to\b",
+    r"\bclose to\b",
+    r"\bparked on\b",
+    r"\bstanding on\b",
+    r"\bbehind\b",
+    r"\bbeside\b",
+    r"\badjacent to\b",
+    r"\binside\b",
+    r"\bwithin\b",
+    r"\babove\b",
+    r"\bbelow\b",
+    r"\bunder\b",
+    r"\bnear\b",
 )
 
 GLOBAL_POSITION_PATTERNS = (
@@ -63,13 +141,23 @@ ORDINAL_PATTERNS = (
 )
 
 TEMPORAL_PATTERNS = (
-    r"\babout to\b", r"\bgoing to\b", r"\bcurrently\b", r"\bmoving\b",
-    r"\bleaving\b", r"\bmerging\b", r"\bentering\b", r"\bexiting\b",
+    r"\babout to\b",
+    r"\bgoing to\b",
+    r"\bcurrently\b",
+    r"\bmoving\b",
+    r"\bleaving\b",
+    r"\bmerging\b",
+    r"\bentering\b",
+    r"\bexiting\b",
 )
 
 ORIENTATION_PATTERNS = (
-    r"\bfacing\b", r"\bheading\b", r"\bfront of\b", r"\bbehind\b",
-    r"\btoward\b", r"\btowards\b",
+    r"\bfacing\b",
+    r"\bheading\b",
+    r"\bfront of\b",
+    r"\bbehind\b",
+    r"\btoward\b",
+    r"\btowards\b",
 )
 
 ARTICLE_PATTERN = re.compile(r"^(the|a|an)\s+", flags=re.IGNORECASE)
@@ -92,26 +180,52 @@ def _extract_target(lower: str) -> str:
         return sorted(matches)[0][2]
     words = re.findall(r"[a-z0-9-]+", lower)
     stopwords = {
-        "the", "a", "an", "that", "which", "is", "are", "in", "on", "of",
-        "with", "to", "from", "near", "left", "right", "upper", "lower",
-        "middle", "front", "behind", "above", "below", "under",
+        "the",
+        "a",
+        "an",
+        "that",
+        "which",
+        "is",
+        "are",
+        "in",
+        "on",
+        "of",
+        "with",
+        "to",
+        "from",
+        "near",
+        "left",
+        "right",
+        "upper",
+        "lower",
+        "middle",
+        "front",
+        "behind",
+        "above",
+        "below",
+        "under",
     }
     content = [word for word in words if word not in stopwords]
     return " ".join(content[-3:]) if content else lower
+
+
+def _first_context_split(lower: str) -> re.Match[str] | None:
+    best: re.Match[str] | None = None
+    for pattern in CONTEXT_SPLIT_PATTERNS:
+        match = re.search(pattern, lower)
+        if match and (best is None or match.start() < best.start()):
+            best = match
+    return best
 
 
 def _extract_context(original: str, lower: str) -> str:
     positional_only = bool(re.search(r"\bon the (left|right)\b", lower))
     if positional_only:
         return ""
-    best: re.Match[str] | None = None
-    for pattern in CONTEXT_SPLIT_PATTERNS:
-        match = re.search(pattern, lower)
-        if match and (best is None or match.start() < best.start()):
-            best = match
-    if best is None:
+    split = _first_context_split(lower)
+    if split is None:
         return ""
-    context = original[best.end():].strip(" ,.;:")
+    context = original[split.end() :].strip(" ,.;:")
     context = ARTICLE_PATTERN.sub("", context)
     return context
 
@@ -122,17 +236,34 @@ def _remove_global_phrases(text: str) -> str:
         result = re.sub(pattern, "", result, flags=re.IGNORECASE)
     for _, pattern in ORDINAL_PATTERNS:
         result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+    result = re.sub(
+        r"\b(?:in|on|at|near)\s+(?:the\s*)?$",
+        "",
+        result,
+        flags=re.IGNORECASE,
+    )
     result = re.sub(r"\s+", " ", result).strip(" ,.;:")
     return result
+
+
+def _extract_target_clause(original: str, lower: str) -> str:
+    split = _first_context_split(lower)
+    clause = original[: split.start()] if split is not None else original
+    clause = ARTICLE_PATTERN.sub("", clause.strip(" ,.;:"))
+    clause = _remove_global_phrases(clause)
+    return clause or original
 
 
 def parse_query_constraints(query: str) -> QueryConstraintGraph:
     original = " ".join(str(query).strip().split())
     lower = original.lower()
-    target = _extract_target(lower)
+    target_clause = _extract_target_clause(original, lower)
+    target_clause_lower = target_clause.lower()
+    target = _extract_target(target_clause_lower)
     attributes = [
-        attribute for attribute in ATTRIBUTE_TERMS
-        if re.search(r"\b" + re.escape(attribute) + r"\b", lower)
+        attribute
+        for attribute in ATTRIBUTE_TERMS
+        if re.search(r"\b" + re.escape(attribute) + r"\b", target_clause_lower)
     ]
     relations = [
         name for name, pattern in RELATION_PATTERNS if re.search(pattern, lower)
@@ -155,7 +286,7 @@ def parse_query_constraints(query: str) -> QueryConstraintGraph:
     if not frames:
         frames.append(SpatialFrame.LOCAL_ATTRIBUTE)
 
-    local_target_query = " ".join([*attributes, target]).strip() or original
+    local_target_query = target_clause
     if SpatialFrame.GLOBAL_ABSOLUTE in frames or SpatialFrame.GLOBAL_ORDER in frames:
         zoom_query = local_target_query
     elif SpatialFrame.OBJECT_RELATIVE in frames:
