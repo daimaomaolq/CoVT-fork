@@ -76,6 +76,10 @@ class ReleaseAuditTests(unittest.TestCase):
         feedback_source = inspect.getsource(CoVTGrounder.generate_base_text)
         self.assertGreaterEqual(ground_source.count("torch.cuda.empty_cache()"), 2)
         self.assertGreaterEqual(feedback_source.count("torch.cuda.empty_cache()"), 2)
+        self.assertIn("_autocast_context", ground_source)
+        self.assertIn("_autocast_context", feedback_source)
+        autocast_source = inspect.getsource(CoVTGrounder._autocast_context)
+        self.assertIn("torch_module.autocast", autocast_source)
 
     def test_formal_cache_requires_measured_token_confidence(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -372,6 +372,16 @@ class CoVTGrounder:
             kwargs["temperature"] = self.settings.temperature
         return kwargs
 
+    def _autocast_context(self, torch_module):
+        parameter = next(self.model.parameters(), None)
+        model_dtype = getattr(parameter, "dtype", None)
+        if self.device.type == "cuda" and model_dtype in {
+            torch_module.float16,
+            torch_module.bfloat16,
+        }:
+            return torch_module.autocast(device_type="cuda", dtype=model_dtype)
+        return nullcontext()
+
     def _bbox_token_confidence(
         self, scores: list[Any], token_ids: list[int]
     ) -> tuple[float, int]:
@@ -420,7 +430,7 @@ class CoVTGrounder:
             for key, value in inputs.items()
         }
         input_length = inputs["input_ids"].shape[1]
-        with torch.no_grad():
+        with torch.no_grad(), self._autocast_context(torch):
             result = self.model.generate(
                 **inputs,
                 **self._generation_kwargs(self.settings.max_new_tokens),
@@ -477,7 +487,7 @@ class CoVTGrounder:
         )
         kwargs = self._generation_kwargs(max_new_tokens)
         kwargs["output_scores"] = False
-        with adapter_context, torch.no_grad():
+        with adapter_context, torch.no_grad(), self._autocast_context(torch):
             result = self.model.generate(**inputs, **kwargs)
         sequence = result.sequences if hasattr(result, "sequences") else result
         generated_text = self.processor.decode(
