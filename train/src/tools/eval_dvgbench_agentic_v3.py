@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--query-field", default="question")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--method",
         choices=[method.value for method in Method],
@@ -232,7 +233,44 @@ def main() -> None:
         cached_path, require_confidence=args.require_initial_confidence
     )
     method = Method(args.method)
-    all_initial_cached = all(sample["sample_id"] in cached for sample in samples)
+    results: list[dict[str, Any]] = []
+    start_position = 0
+    if args.resume and output_path.is_file():
+        results = read_jsonl(output_path)
+        if len(results) > len(samples):
+            raise ValueError(
+                f"Resume output has {len(results)} rows but index has {len(samples)}"
+            )
+        for offset, (existing, sample) in enumerate(zip(results, samples), 1):
+            if existing.get("sample_id") != sample["sample_id"]:
+                raise ValueError(
+                    f"Resume sample mismatch at row {offset}: "
+                    f"{existing.get('sample_id')} != {sample['sample_id']}"
+                )
+            if existing.get("method") != method.value:
+                raise ValueError(
+                    f"Resume method mismatch at sample {sample['sample_id']}"
+                )
+            inference = existing.get("inference", {})
+            if inference.get("query") != sample["query"]:
+                raise ValueError(
+                    f"Resume query mismatch at sample {sample['sample_id']}"
+                )
+            if inference.get("question_e_used") is not False:
+                raise ValueError(f"Unsafe resume trace at sample {sample['sample_id']}")
+            if "evaluation" not in existing:
+                raise ValueError(
+                    f"Unevaluated resume row at sample {sample['sample_id']}"
+                )
+        start_position = len(results)
+        print(
+            f"[resume] validated {start_position}/{len(samples)} completed samples",
+            flush=True,
+        )
+    pending_samples = samples[start_position:]
+    all_initial_cached = all(
+        sample["sample_id"] in cached for sample in pending_samples
+    )
     extra_perception_possible = (
         method != Method.ONE_PASS and args.max_child_perception_calls > 0
     )
@@ -240,7 +278,7 @@ def main() -> None:
         Method.HIERARCHICAL,
         Method.STATIC_ALL,
     }
-    needs_model = (
+    needs_model = bool(pending_samples) and (
         not all_initial_cached or extra_perception_possible or base_feedback_possible
     )
     grounder = build_grounder(args, needs_model)
@@ -248,9 +286,12 @@ def main() -> None:
     parent = HierarchicalParentAgent(grounder, agent_config)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    results: list[dict[str, Any]] = []
-    with output_path.open("w", encoding="utf-8") as handle:
-        for position, (row, sample) in enumerate(zip(rows, samples), 1):
+    output_mode = "a" if start_position else "w"
+    with output_path.open(output_mode, encoding="utf-8") as handle:
+        pending_rows = rows[start_position:]
+        for position, (row, sample) in enumerate(
+            zip(pending_rows, pending_samples), start_position + 1
+        ):
             image_path = resolve_image_path(sample["image"], index_path)
             if not image_path.is_file():
                 raise FileNotFoundError(

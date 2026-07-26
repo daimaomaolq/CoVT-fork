@@ -21,6 +21,7 @@ ANCHOR_PROMPT_MODE=${ANCHOR_PROMPT_MODE:-query_tail}
 ANCHOR_TOKEN_COUNTS=${ANCHOR_TOKEN_COUNTS:-}
 RESUME=${RESUME:-1}
 EXPERIMENT_FLAGS=()
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
@@ -55,6 +56,9 @@ run_experiment() {
     --feedback-mode "$feedback"
   )
   command+=("${EXPERIMENT_FLAGS[@]}")
+  if [[ "$RESUME" == "1" ]]; then
+    command+=(--resume)
+  fi
   if [[ -n "$ADAPTER_PATH" ]]; then
     command+=(--adapter-path "$ADAPTER_PATH")
   fi

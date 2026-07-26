@@ -16,6 +16,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $env:PYTORCH_CUDA_ALLOC_CONF) {
+    $env:PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
+}
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $evalScript = Join-Path $repoRoot "train/src/tools/eval_dvgbench_agentic_v3.py"
 $summaryScript = Join-Path $repoRoot "train/src/tools/summarize_dvgbench_agentic_v3_matrix.py"
@@ -52,6 +55,9 @@ function Invoke-AgenticExperiment {
         "--feedback-mode", $RunFeedbackMode
     )
     $arguments += $ExtraArgs
+    if ($Resume) {
+        $arguments += "--resume"
+    }
     if ($AdapterPath) {
         $arguments += @("--adapter-path", $AdapterPath)
     }

@@ -39,12 +39,14 @@ class FakeGrounder:
         observation,
         parent_candidate_id=None,
     ):
-        self.calls.append({
-            "query": query,
-            "candidate_id": candidate_id,
-            "source_agent": source_agent,
-            "observation": observation,
-        })
+        self.calls.append(
+            {
+                "query": query,
+                "candidate_id": candidate_id,
+                "source_agent": source_agent,
+                "observation": observation,
+            }
+        )
         boxes = {
             "BaseGrounder": [0.70, 0.70, 0.80, 0.80],
             "TargetAgent": [0.10, 0.50, 0.20, 0.60],
@@ -123,11 +125,13 @@ class InputSafetyTests(unittest.TestCase):
                 load_cached_predictions(path)
 
     def test_prediction_token_coordinates_are_normalized(self):
-        candidate = candidate_from_prediction({
-            "sample_id": "s1",
-            "bbox": [100, 200, 300, 400],
-            "raw_output": "{<100><200><300><400>}",
-        })
+        candidate = candidate_from_prediction(
+            {
+                "sample_id": "s1",
+                "bbox": [100, 200, 300, 400],
+                "raw_output": "{<100><200><300><400>}",
+            }
+        )
         self.assertEqual(candidate.bbox, [0.1, 0.2, 0.3, 0.4])
 
 
@@ -299,6 +303,19 @@ class CliSmokeTests(unittest.TestCase):
             trace = json.loads(output_path.read_text(encoding="utf-8").strip())
             self.assertFalse(trace["inference"]["question_e_used"])
             self.assertEqual(trace["cost"]["executed_perception_calls"], 0)
+            resumed = subprocess.run(
+                [*completed.args, "--resume"],
+                cwd=str(train_root.parent),
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertIn("[resume] validated 1/1", resumed.stdout)
+            self.assertEqual(
+                len(output_path.read_text(encoding="utf-8").splitlines()), 1
+            )
 
 
 class MatrixSummaryTests(unittest.TestCase):
@@ -307,10 +324,12 @@ class MatrixSummaryTests(unittest.TestCase):
             root = Path(directory)
             summary = {
                 "method": "hierarchical",
-                "config": {"agent": {
-                    "max_child_perception_calls": 2,
-                    "disabled_agents": [],
-                }},
+                "config": {
+                    "agent": {
+                        "max_child_perception_calls": 2,
+                        "disabled_agents": [],
+                    }
+                },
                 "protocol_guards": {"question_e_used": False},
                 "one_pass": {
                     "class_Acc@0.5": {"traffic": 0.25, "vehicle": 0.50},
@@ -349,8 +368,7 @@ class MatrixSummaryTests(unittest.TestCase):
             )
             train_root = Path(__file__).resolve().parents[1]
             cli_path = (
-                train_root / "src" / "tools"
-                / "summarize_dvgbench_agentic_v3_matrix.py"
+                train_root / "src" / "tools" / "summarize_dvgbench_agentic_v3_matrix.py"
             )
             csv_path = root / "matrix.csv"
             completed = subprocess.run(
@@ -369,16 +387,13 @@ class MatrixSummaryTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            class_csv = (root / "matrix_per_class.csv").read_text(
-                encoding="utf-8-sig"
-            )
+            class_csv = (root / "matrix_per_class.csv").read_text(encoding="utf-8-sig")
             failure_csv = (root / "matrix_failure_recovery.csv").read_text(
                 encoding="utf-8-sig"
             )
             self.assertIn("Delta Acc@0.5", class_csv)
             self.assertIn("traffic,4,", class_csv)
             self.assertIn("relation_wrong", failure_csv)
-
 
 
 class EvaluationTests(unittest.TestCase):

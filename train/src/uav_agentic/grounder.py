@@ -411,6 +411,8 @@ class CoVTGrounder:
     ) -> Candidate:
         import torch
 
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
         started = time.perf_counter()
         inputs = self._prepare_grounding_inputs(image, query)
         inputs = {
@@ -431,7 +433,7 @@ class CoVTGrounder:
         confidence, token_count = self._bbox_token_confidence(
             list(result.scores), token_ids
         )
-        return Candidate(
+        candidate = Candidate(
             candidate_id=candidate_id,
             bbox=parse_bbox_text(raw_output),
             source_agent=source_agent,
@@ -443,10 +445,16 @@ class CoVTGrounder:
             latency_ms=(time.perf_counter() - started) * 1000,
             parent_candidate_id=parent_candidate_id,
         )
+        del result, generated_ids, inputs
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        return candidate
 
     def generate_base_text(self, prompt: str, max_new_tokens: int = 256) -> str:
         import torch
 
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
         messages = [
             {
                 "role": "user",
@@ -472,6 +480,10 @@ class CoVTGrounder:
         with adapter_context, torch.no_grad():
             result = self.model.generate(**inputs, **kwargs)
         sequence = result.sequences if hasattr(result, "sequences") else result
-        return self.processor.decode(
+        generated_text = self.processor.decode(
             sequence[0, input_length:], skip_special_tokens=True
         ).strip()
+        del result, sequence, inputs
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        return generated_text

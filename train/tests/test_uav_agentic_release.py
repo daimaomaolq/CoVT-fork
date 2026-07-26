@@ -72,6 +72,10 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertNotIn("Qwen2_5_VLForConditionalGeneration", source)
         self.assertIn("Path(__file__).resolve().parents[3]", source)
         self.assertIn("sys.path.insert", source)
+        ground_source = inspect.getsource(CoVTGrounder.ground)
+        feedback_source = inspect.getsource(CoVTGrounder.generate_base_text)
+        self.assertGreaterEqual(ground_source.count("torch.cuda.empty_cache()"), 2)
+        self.assertGreaterEqual(feedback_source.count("torch.cuda.empty_cache()"), 2)
 
     def test_formal_cache_requires_measured_token_confidence(self):
         with tempfile.TemporaryDirectory() as directory:
