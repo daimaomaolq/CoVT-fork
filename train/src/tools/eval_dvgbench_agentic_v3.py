@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
         "--max-child-perception-calls",
         dest="max_child_perception_calls",
         type=int,
-        default=3,
+        default=5,
     )
     parser.add_argument(
         "--disable-unit",
@@ -110,8 +110,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--competition-margin-threshold", type=float, default=0.12)
     parser.add_argument("--final-confidence-threshold", type=float, default=0.48)
     parser.add_argument("--information-gain-threshold", type=float, default=0.02)
-    parser.add_argument("--zoom-scales", type=float, nargs="+", default=[2.5, 4.0])
-    parser.add_argument("--zoom-min-crop-size", type=float, default=0.16)
+    parser.add_argument("--zoom-scales", type=float, nargs="+", default=[3.0, 6.0])
+    parser.add_argument("--zoom-min-crop-size", type=float, default=0.25)
     parser.add_argument("--zoom-identity-iou-threshold", type=float, default=0.05)
     parser.add_argument("--zoom-center-distance-threshold", type=float, default=0.20)
     parser.add_argument("--zoom-relation-drop-tolerance", type=float, default=0.15)
@@ -128,6 +128,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-target-tile-calls", type=int, default=2)
     parser.add_argument("--verification-confidence-threshold", type=float, default=0.35)
     parser.add_argument("--verification-max-crop-area", type=float, default=0.90)
+    parser.add_argument("--verification-advantage-margin", type=float, default=0.05)
+    parser.add_argument("--no-symmetric-verification", action="store_true")
     parser.add_argument("--no-constraint-graph", action="store_true")
     parser.add_argument("--no-semantic-frame-protection", action="store_true")
     parser.add_argument("--no-false-repair-guard", action="store_true")
@@ -192,6 +194,8 @@ def build_agent_config(args: argparse.Namespace) -> AgenticConfig:
         max_target_tile_calls=args.max_target_tile_calls,
         verification_confidence_threshold=args.verification_confidence_threshold,
         verification_max_crop_area=args.verification_max_crop_area,
+        verification_advantage_margin=args.verification_advantage_margin,
+        enable_symmetric_verification=not args.no_symmetric_verification,
         enable_constraint_graph=not args.no_constraint_graph,
         enable_semantic_frame_protection=not args.no_semantic_frame_protection,
         enable_false_repair_guard=not args.no_false_repair_guard,

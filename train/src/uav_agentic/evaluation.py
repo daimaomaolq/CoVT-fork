@@ -367,6 +367,29 @@ def summarize(
     total_hypotheses = sum(
         int(row["evaluation"].get("hypothesis_count", 0)) for row in rows
     )
+    initial_verified = 0
+    verification_advantages = 0
+    relocation_attempts = 0
+    relocation_recoveries = 0
+    for row in rows:
+        fusion_evidence = (
+            row["inference"].get("verification_evidence", {}).get("fusion", {})
+        )
+        hypotheses = fusion_evidence.get("hypotheses", [])
+        if any(
+            item.get("hypothesis_id") == "c00" and item.get("cross_view_supported")
+            for item in hypotheses
+        ):
+            initial_verified += 1
+        if fusion_evidence.get("verification_advantage"):
+            verification_advantages += 1
+        if row["inference"].get(
+            "final_candidate_id"
+        ) != "c00" and not fusion_evidence.get("same_identity_hypothesis", True):
+            relocation_attempts += 1
+            relocation_recoveries += int(
+                row["evaluation"].get("recovered_at_0_5", False)
+            )
     feedback_rows = [
         row for row in rows if row["inference"].get("human_feedback") is not None
     ]
@@ -466,6 +489,16 @@ def summarize(
             ),
             "Root Verification Rate": _safe_ratio(
                 verified_hypotheses, total_hypotheses
+            ),
+            "Initial Hypothesis Verification Rate": _safe_ratio(
+                initial_verified, len(rows)
+            ),
+            "Verification Advantage Rate": _safe_ratio(
+                verification_advantages, len(rows)
+            ),
+            "Relocation Rate": _safe_ratio(relocation_attempts, len(rows)),
+            "Relocation Recovery Precision": _safe_ratio(
+                relocation_recoveries, relocation_attempts
             ),
             "Selection Success Given Oracle Hit": _safe_ratio(
                 sum(final and oracle for final, oracle in zip(final_hits, oracle_hits)),

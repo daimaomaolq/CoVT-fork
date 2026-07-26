@@ -345,6 +345,8 @@ class RelationAndZoomTests(unittest.TestCase):
         self.assertLessEqual(crop_area, context.config.verification_max_crop_area)
         self.assertTrue(result.call.evidence["independent_transformed_view"])
         self.assertTrue(result.call.input["relation_checked_in_global_frame"])
+        self.assertEqual(grounder.calls[-1]["query"], graph.zoom_query)
+        self.assertIn("standing on the road", graph.zoom_query)
         self.assertNotIn(
             "context_not_preserved", result.call.evidence["rejection_reasons"]
         )
@@ -376,7 +378,7 @@ class ParentIntegrationTests(unittest.TestCase):
         )
         self.assertIn("hypothesis_clusters", result["inference"])
 
-    def test_small_target_uses_probe_tile_then_zoom_within_budget(self):
+    def test_small_target_uses_symmetric_initial_verification_within_budget(self):
         grounder = FakeGrounder()
         config = AgenticConfig(
             method=Method.HIERARCHICAL,
@@ -395,8 +397,8 @@ class ParentIntegrationTests(unittest.TestCase):
             actions,
             [
                 "TargetAgent:global_competition_probe",
+                "ZoomAgent:semantic_query_zoom_verification",
                 "TargetAgent:transformed_view_target_search",
-                "ZoomAgent:semantic_frame_preserving_zoom",
             ],
         )
         self.assertEqual(result["inference"]["routing_plan"]["budget_used"], 3)
@@ -410,8 +412,13 @@ class ParentIntegrationTests(unittest.TestCase):
             for item in result["inference"]["target_candidates"]
             if item["candidate_id"] == zoom["parent_candidate_id"]
         )
-        self.assertEqual(parent["observation"]["view_type"], "target_search_tile")
+        self.assertEqual(parent["source_agent"], "BaseGrounder")
+        self.assertEqual(parent["observation"]["view_type"], "full_image")
         self.assertEqual(zoom["hypothesis_id"], parent["candidate_id"])
+        self.assertEqual(
+            zoom["query_used"],
+            result["inference"]["constraint_graph"]["zoom_query"],
+        )
 
     def test_dynamic_scheduler_never_exceeds_budget_across_query_types(self):
         queries = [
@@ -422,7 +429,7 @@ class ParentIntegrationTests(unittest.TestCase):
             "the car about to enter the road",
         ]
         disabled_sets = [set(), {"zoom"}, {"context"}, {"target"}]
-        for budget in range(4):
+        for budget in range(6):
             for query in queries:
                 for disabled in disabled_sets:
                     with self.subTest(

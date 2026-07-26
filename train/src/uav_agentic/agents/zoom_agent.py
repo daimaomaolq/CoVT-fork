@@ -110,11 +110,11 @@ class ZoomAgent:
             transform=f"crop_scale_{scale:g}",
             preserves_context=preserves_context,
         )
-        # Crop-local grounding receives target semantics only. Direction, ordinal and
-        # target-context constraints remain in the parent and are re-applied after the
-        # local box is mapped back to the original image frame.
+        # Candidate verification retains implicit target semantics and
+        # object-relative relations. Only global image-coordinate and ordinal phrases
+        # are removed, because those constraints are re-applied after remapping.
         zoom_query = (
-            context.graph.local_target_query
+            context.graph.zoom_query
             if context.config.enable_semantic_frame_protection
             else context.graph.original
         )
@@ -148,7 +148,7 @@ class ZoomAgent:
             call_id=f"call_{candidate_id}",
             agent=self.name,
             action=(
-                "semantic_frame_preserving_zoom"
+                "semantic_query_zoom_verification"
                 if context.config.enable_semantic_frame_protection
                 else "naive_crop_zoom"
             ),
@@ -156,7 +156,7 @@ class ZoomAgent:
                 "seed_candidate_id": seed.candidate_id,
                 "query": zoom_query,
                 "query_scope": (
-                    "target_clause_without_global_coordinates"
+                    "semantic_query_without_global_coordinates"
                     if context.config.enable_semantic_frame_protection
                     else "full_query_ablation"
                 ),

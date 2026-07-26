@@ -26,7 +26,7 @@ from .schema import (
 )
 
 
-SCHEMA_VERSION = "dai-uav-agent-v4.1"
+SCHEMA_VERSION = "dai-uav-agent-v5.0"
 
 
 def _safe_fusion(
@@ -134,16 +134,55 @@ def _apply_false_repair_guard(
         if selected.bbox is not None and initial.bbox is not None
         else 0.0
     )
+    initial_hypothesis = next(
+        (
+            item
+            for item in fusion.evidence.get("hypotheses", [])
+            if item.get("hypothesis_id") == initial.candidate_id
+        ),
+        {},
+    )
+    selected_verification_strength = float(
+        selected_hypothesis.get("verification_strength", 0.0)
+    )
+    initial_verification_strength = float(
+        initial_hypothesis.get("verification_strength", 0.0)
+    )
+    verification_advantage = bool(
+        selected_hypothesis.get("cross_view_supported")
+        and selected_verification_strength
+        >= initial_verification_strength + config.verification_advantage_margin
+    )
+    if verification_advantage:
+        evidence.append("cross_view_verification_advantage")
     constraint_relocation_supported = bool(
         {"relation_constraint_gain", "global_constraint_gain"}.intersection(evidence)
     )
-    identity_preserved = (
+    same_identity = (
+        initial.bbox is not None
+        and identity_iou >= config.replacement_identity_iou_threshold
+    )
+    strong_confidence_support = "strong_token_confidence_gain" in evidence
+    if initial.bbox is None:
+        semantic_replacement_supported = bool(evidence)
+    elif same_identity:
+        semantic_replacement_supported = bool(
+            verification_advantage
+            or constraint_relocation_supported
+            or strong_confidence_support
+        )
+    else:
+        semantic_replacement_supported = bool(
+            verification_advantage or constraint_relocation_supported
+        )
+    identity_preserved = bool(
         initial.bbox is None
-        or identity_iou >= config.replacement_identity_iou_threshold
+        or same_identity
+        or verification_advantage
         or constraint_relocation_supported
     )
     replacement_supported = (
-        bool(evidence)
+        semantic_replacement_supported
         and (initial.bbox is None or score_improvement >= config.false_repair_margin)
         and identity_preserved
     )
@@ -158,6 +197,10 @@ def _apply_false_repair_guard(
             "replacement_support_evidence": evidence,
             "cross_view_partner_id": cross_view_partner_id,
             "replacement_identity_iou": identity_iou,
+            "same_identity_hypothesis": same_identity,
+            "initial_verification_strength": initial_verification_strength,
+            "selected_verification_strength": selected_verification_strength,
+            "verification_advantage": verification_advantage,
             "replacement_identity_preserved": identity_preserved,
             "constraint_relocation_supported": constraint_relocation_supported,
             "replacement_supported": replacement_supported,
@@ -569,26 +612,6 @@ class HierarchicalParentAgent:
                     attempted.add("relation")
                 return _safe_fusion(candidates, graph, self.config)
 
-            def best_diverse_target() -> Candidate | None:
-                alternatives = [
-                    candidate
-                    for candidate in candidates
-                    if candidate.source_agent == "TargetAgent"
-                    and candidate.parent_candidate_id is None
-                    and candidate.bbox is not None
-                    and candidate.accepted_by_guard
-                    and (
-                        initial.bbox is None
-                        or box_iou(candidate.bbox, initial.bbox)
-                        < self.config.target_diversity_iou_threshold
-                    )
-                ]
-                return (
-                    max(alternatives, key=lambda item: item.fused_score)
-                    if alternatives
-                    else None
-                )
-
             planned_actions = set(routing.perception_actions)
             if (
                 "target" in planned_actions
@@ -612,31 +635,76 @@ class HierarchicalParentAgent:
                 attempted.add("context")
 
             preliminary_fusion = refresh_relation_and_fusion()
-            alternative = best_diverse_target()
             search_risk = (
                 bool(routing.preliminary_suspicions) or graph.is_position_sensitive
             )
-            tile_search_performed = False
 
-            # A separated target hypothesis is verified directly. If the full-image
-            # probe only repeats the initial box, spend the remaining budget on unseen
-            # transformed observation tiles and verify the first diverse hypothesis.
-            if (
-                alternative is not None
-                and budget_used() < budget
-                and "zoom" not in self.config.disabled_agents
-            ):
+            def is_verified(seed: Candidate) -> bool:
+                return any(
+                    candidate.source_agent == "ZoomAgent"
+                    and candidate.parent_candidate_id == seed.candidate_id
+                    and candidate.bbox is not None
+                    and candidate.accepted_by_guard
+                    for candidate in candidates
+                )
+
+            def best_unverified_diverse_target() -> Candidate | None:
+                alternatives = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.source_agent == "TargetAgent"
+                    and candidate.parent_candidate_id is None
+                    and candidate.bbox is not None
+                    and candidate.accepted_by_guard
+                    and not is_verified(candidate)
+                    and (
+                        initial.bbox is None
+                        or box_iou(candidate.bbox, initial.bbox)
+                        < self.config.target_diversity_iou_threshold
+                    )
+                ]
+                return (
+                    max(alternatives, key=lambda item: item.fused_score)
+                    if alternatives
+                    else None
+                )
+
+            def verify_hypothesis(seed: Candidate) -> None:
+                nonlocal preliminary_fusion
+                if (
+                    budget_used() >= budget
+                    or "zoom" in self.config.disabled_agents
+                    or seed.bbox is None
+                    or is_verified(seed)
+                ):
+                    return
                 result = self.zoom_agent.run(
                     make_context(),
-                    alternative,
+                    seed,
                     self._next_candidate_id(candidates),
                 )
                 candidates.extend(result.candidates)
                 calls.append(result.call)
                 attempted.add("zoom")
                 preliminary_fusion = refresh_relation_and_fusion()
-            elif (
-                search_risk
+
+            # Verification is symmetric: the initial hypothesis receives the same
+            # semantic transformed-view test as any proposed replacement.
+            if (
+                self.config.method == Method.HIERARCHICAL
+                and self.config.enable_symmetric_verification
+            ):
+                verify_hypothesis(initial)
+
+            alternative = best_unverified_diverse_target()
+            if alternative is not None:
+                verify_hypothesis(alternative)
+
+            explore_competition = bool(
+                search_risk or self.config.competition_probe_mode == "always"
+            )
+            if (
+                explore_competition
                 and budget_used() < budget
                 and "target" not in self.config.disabled_agents
             ):
@@ -646,7 +714,6 @@ class HierarchicalParentAgent:
                 regions = self.target_agent.proposal_regions(
                     make_context(), initial, remaining
                 )
-                tile_search_performed = True
                 for region in regions:
                     if budget_used() >= budget:
                         break
@@ -657,61 +724,9 @@ class HierarchicalParentAgent:
                     )
                     append_target_result(result)
                     preliminary_fusion = refresh_relation_and_fusion()
-                    alternative = best_diverse_target()
-                    if (
-                        alternative is not None
-                        and budget_used() < budget
-                        and "zoom" not in self.config.disabled_agents
-                    ):
-                        result = self.zoom_agent.run(
-                            make_context(),
-                            alternative,
-                            self._next_candidate_id(candidates),
-                        )
-                        candidates.extend(result.candidates)
-                        calls.append(result.call)
-                        attempted.add("zoom")
-                        preliminary_fusion = refresh_relation_and_fusion()
-                        break
-            elif (
-                "zoom" in planned_actions
-                and budget_used() < budget
-                and "zoom" not in self.config.disabled_agents
-                and initial.bbox is not None
-            ):
-                # Zoom-only ablation: verification can refine the initial hypothesis
-                # but is not treated as global target search.
-                result = self.zoom_agent.run(
-                    make_context(),
-                    initial,
-                    self._next_candidate_id(candidates),
-                )
-                candidates.extend(result.candidates)
-                calls.append(result.call)
-                attempted.add("zoom")
-                preliminary_fusion = refresh_relation_and_fusion()
-
-            if (
-                search_risk
-                and not tile_search_performed
-                and budget_used() < budget
-                and "target" not in self.config.disabled_agents
-            ):
-                remaining = min(
-                    budget - budget_used(), self.config.max_target_tile_calls
-                )
-                for region in self.target_agent.proposal_regions(
-                    make_context(), initial, remaining
-                ):
-                    if budget_used() >= budget:
-                        break
-                    result = self.target_agent.run_transformed_view(
-                        make_context(),
-                        self._next_candidate_id(candidates),
-                        region,
-                    )
-                    append_target_result(result)
-                    preliminary_fusion = refresh_relation_and_fusion()
+                    alternative = best_unverified_diverse_target()
+                    if alternative is not None and budget_used() < budget:
+                        verify_hypothesis(alternative)
 
             fusion = _safe_fusion(candidates, graph, self.config)
 
