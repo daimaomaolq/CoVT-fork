@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from uav_agentic.agents.base import AgentContext
 from uav_agentic.agents.zoom_agent import ZoomAgent
 from uav_agentic.fusion import FusionResult
 from uav_agentic.io import load_cached_predictions
+from uav_agentic.grounder import CoVTGrounder
 from uav_agentic.parent_agent import HierarchicalParentAgent, _apply_false_repair_guard
 from uav_agentic.query_constraints import parse_query_constraints
 from uav_agentic.schema import AgenticConfig, Candidate, Method, Observation
@@ -64,6 +66,11 @@ class RecordingZoomGrounder:
 
 
 class ReleaseAuditTests(unittest.TestCase):
+    def test_grounder_has_no_generic_qwen_fallback(self):
+        source = inspect.getsource(CoVTGrounder.load)
+        self.assertIn("CoVTForConditionalGeneration", source)
+        self.assertNotIn("Qwen2_5_VLForConditionalGeneration", source)
+
     def test_formal_cache_requires_measured_token_confidence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "old.jsonl"

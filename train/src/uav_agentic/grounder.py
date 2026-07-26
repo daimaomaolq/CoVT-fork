@@ -43,7 +43,14 @@ ANCHOR_TOKEN_BY_ID = {
     "metaclip": METACLIP_PAD_TOKEN,
 }
 CANONICAL_ANCHOR_ORDER = [
-    "sam", "dino", "depth", "SD", "InternViT", "pidinet", "siglip", "metaclip"
+    "sam",
+    "dino",
+    "depth",
+    "SD",
+    "InternViT",
+    "pidinet",
+    "siglip",
+    "metaclip",
 ]
 DEFAULT_ANCHOR_COUNTS = {
     "sam": 8,
@@ -219,27 +226,34 @@ class CoVTGrounder:
         import torch
         from transformers import AutoProcessor
 
-        try:
-            from training.covt_qwen2_5_vl import CoVTForConditionalGeneration
+        from training.covt_qwen2_5_vl import CoVTForConditionalGeneration
 
-            model_class = CoVTForConditionalGeneration
-        except Exception:
-            from transformers import Qwen2_5_VLForConditionalGeneration
-
-            model_class = Qwen2_5_VLForConditionalGeneration
+        model_class = CoVTForConditionalGeneration
+        print(
+            json.dumps(
+                {
+                    "status": "selected_grounder_model_class",
+                    "model_class": model_class.__name__,
+                    "generic_qwen_fallback": False,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
 
         device = torch.device(
-            "cuda:0" if settings.device == "auto" and torch.cuda.is_available()
-            else "cpu" if settings.device == "auto"
+            "cuda:0"
+            if settings.device == "auto" and torch.cuda.is_available()
+            else "cpu"
+            if settings.device == "auto"
             else settings.device
         )
         processor_candidates = []
         if settings.adapter_path:
             adapter_path = Path(settings.adapter_path)
-            if (
-                (adapter_path / "tokenizer_config.json").is_file()
-                or (adapter_path / "preprocessor_config.json").is_file()
-            ):
+            if (adapter_path / "tokenizer_config.json").is_file() or (
+                adapter_path / "preprocessor_config.json"
+            ).is_file():
                 processor_candidates.append(str(adapter_path))
         processor_candidates.append(settings.model_path)
         processor_error: Exception | None = None
@@ -267,12 +281,20 @@ class CoVTGrounder:
                 _single_token_id(processor.tokenizer, token)
             if hasattr(model, "get_anchor_token_idx"):
                 canonical_tokens = [
-                    SAM_PAD_TOKEN, DINO_PAD_TOKEN, DEPTH_PAD_TOKEN, SD_PAD_TOKEN,
-                    INTERN_PAD_TOKEN, PIDINET_PAD_TOKEN, SIGLIP_PAD_TOKEN,
+                    SAM_PAD_TOKEN,
+                    DINO_PAD_TOKEN,
+                    DEPTH_PAD_TOKEN,
+                    SD_PAD_TOKEN,
+                    INTERN_PAD_TOKEN,
+                    PIDINET_PAD_TOKEN,
+                    SIGLIP_PAD_TOKEN,
                     METACLIP_PAD_TOKEN,
                 ]
                 model.get_anchor_token_idx(
-                    *[_single_token_id(processor.tokenizer, token) for token in canonical_tokens]
+                    *[
+                        _single_token_id(processor.tokenizer, token)
+                        for token in canonical_tokens
+                    ]
                 )
         embedding_rows = model.get_input_embeddings().weight.shape[0]
         if len(processor.tokenizer) > embedding_rows:
@@ -284,12 +306,18 @@ class CoVTGrounder:
             if non_lora_path.is_file():
                 state = torch.load(non_lora_path, map_location="cpu")
                 missing, unexpected = model.load_state_dict(state, strict=False)
-                print(json.dumps({
-                    "status": "loaded_non_lora_state",
-                    "path": str(non_lora_path),
-                    "missing": len(missing),
-                    "unexpected": len(unexpected),
-                }, ensure_ascii=False), flush=True)
+                print(
+                    json.dumps(
+                        {
+                            "status": "loaded_non_lora_state",
+                            "path": str(non_lora_path),
+                            "missing": len(missing),
+                            "unexpected": len(unexpected),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
             model = PeftModel.from_pretrained(model, settings.adapter_path)
         model.to(device)
         model.eval()
@@ -308,13 +336,15 @@ class CoVTGrounder:
         )
 
     def _prepare_grounding_inputs(self, image: Image.Image, query: str):
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": self._grounding_prompt(query)},
-            ],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": self._grounding_prompt(query)},
+                ],
+            }
+        ]
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -355,9 +385,9 @@ class CoVTGrounder:
             selected = list(range(len(token_ids)))
         probabilities = []
         for index in selected:
-            log_probability = torch.log_softmax(
-                scores[index][0].float(), dim=-1
-            )[int(token_ids[index])]
+            log_probability = torch.log_softmax(scores[index][0].float(), dim=-1)[
+                int(token_ids[index])
+            ]
             probabilities.append(float(log_probability.exp().item()))
         confidence = math.exp(
             sum(math.log(max(probability, 1e-9)) for probability in probabilities)
@@ -412,10 +442,12 @@ class CoVTGrounder:
     def generate_base_text(self, prompt: str, max_new_tokens: int = 256) -> str:
         import torch
 
-        messages = [{
-            "role": "user",
-            "content": [{"type": "text", "text": prompt}],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            }
+        ]
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
