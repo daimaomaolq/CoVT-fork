@@ -265,7 +265,11 @@ class RelationAndZoomTests(unittest.TestCase):
             bbox=[0.61, 0.61, 0.71, 0.71],
             source_agent="ZoomAgent",
             query_used="car",
-            observation=Observation("zoom", "crop_zoom"),
+            observation=Observation(
+                "zoom",
+                "crop_zoom",
+                crop_region=[0.55, 0.55, 0.80, 0.80],
+            ),
             bbox_token_confidence=0.50,
             parent_candidate_id="c01",
         )
@@ -278,6 +282,72 @@ class RelationAndZoomTests(unittest.TestCase):
         selected = fusion.evidence["selected_hypothesis"]
         self.assertTrue(selected["cross_view_supported"])
         self.assertEqual(selected["supporting_verification_ids"], ["c02"])
+
+    def test_full_image_zoom_cannot_count_as_independent_support(self):
+        initial = cached_candidate([0.1, 0.1, 0.2, 0.2], confidence=0.65)
+        alternative = Candidate(
+            candidate_id="c01",
+            bbox=[0.60, 0.60, 0.70, 0.70],
+            source_agent="TargetAgent",
+            query_used="car",
+            observation=Observation("target", "full_image_target_probe"),
+            bbox_token_confidence=0.45,
+        )
+        repeated = Candidate(
+            candidate_id="c02",
+            bbox=[0.60, 0.60, 0.70, 0.70],
+            source_agent="ZoomAgent",
+            query_used="car",
+            observation=Observation(
+                "zoom",
+                "crop_zoom",
+                crop_region=[0.0, 0.0, 1.0, 1.0],
+            ),
+            bbox_token_confidence=0.50,
+            parent_candidate_id="c01",
+        )
+        fusion = rank_candidates(
+            [initial, alternative, repeated],
+            parse_query_constraints("the car"),
+            AgenticConfig(),
+        )
+        hypothesis = next(
+            item
+            for item in fusion.evidence["hypotheses"]
+            if item["hypothesis_id"] == "c01"
+        )
+        self.assertFalse(hypothesis["cross_view_supported"])
+        self.assertEqual(hypothesis["independent_verification_ids"], [])
+
+    def test_object_relative_zoom_stays_a_transformed_target_view(self):
+        grounder = FakeGrounder()
+        graph = parse_query_constraints("A child in yellow standing on the road")
+        seed = cached_candidate([0.07, 0.15, 0.09, 0.19])
+        road = Candidate(
+            candidate_id="x00",
+            bbox=[0.0, 0.0, 1.0, 1.0],
+            source_agent="ContextAgent",
+            query_used="road",
+            observation=Observation("context", "full_image"),
+            bbox_token_confidence=0.8,
+        )
+        context = AgentContext(
+            image=Image.new("RGB", (100, 100), "white"),
+            graph=graph,
+            grounder=grounder,
+            config=AgenticConfig(),
+            target_candidates=[seed],
+            context_candidates=[road],
+        )
+        result = ZoomAgent().run(context, seed, "c01")
+        crop = result.call.input["crop_region"]
+        crop_area = (crop[2] - crop[0]) * (crop[3] - crop[1])
+        self.assertLessEqual(crop_area, context.config.verification_max_crop_area)
+        self.assertTrue(result.call.evidence["independent_transformed_view"])
+        self.assertTrue(result.call.input["relation_checked_in_global_frame"])
+        self.assertNotIn(
+            "context_not_preserved", result.call.evidence["rejection_reasons"]
+        )
 
 
 class ParentIntegrationTests(unittest.TestCase):

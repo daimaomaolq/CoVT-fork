@@ -165,6 +165,7 @@ class AgenticConfig:
     target_diversity_iou_threshold: float = 0.85
     max_target_tile_calls: int = 2
     verification_confidence_threshold: float = 0.35
+    verification_max_crop_area: float = 0.90
     disabled_agents: set[str] = field(default_factory=set)
     feedback_mode: str = "template"
     enable_escalation: bool = True
@@ -172,7 +173,8 @@ class AgenticConfig:
     enable_constraint_graph: bool = True
     enable_semantic_frame_protection: bool = True
     enable_false_repair_guard: bool = True
-    false_repair_margin: float = 0.02
+    false_repair_margin: float = 0.05
+    replacement_identity_iou_threshold: float = 0.50
     replacement_confidence_threshold: float = 0.60
     replacement_confidence_gain_threshold: float = 0.15
     replacement_cross_view_iou_threshold: float = 0.25
@@ -211,7 +213,11 @@ class AgenticConfig:
             "verification_confidence_threshold": (
                 self.verification_confidence_threshold
             ),
+            "verification_max_crop_area": self.verification_max_crop_area,
             "false_repair_margin": self.false_repair_margin,
+            "replacement_identity_iou_threshold": (
+                self.replacement_identity_iou_threshold
+            ),
             "replacement_confidence_threshold": (self.replacement_confidence_threshold),
             "replacement_confidence_gain_threshold": (
                 self.replacement_confidence_gain_threshold

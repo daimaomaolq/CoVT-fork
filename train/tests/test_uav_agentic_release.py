@@ -149,7 +149,7 @@ class ReleaseAuditTests(unittest.TestCase):
     def test_false_repair_guard_accepts_strong_confidence_gain(self):
         initial = make_candidate("c00", confidence=0.40)
         initial.fused_score = 0.50
-        refined = make_candidate("c01", [0.5, 0.5, 0.6, 0.6], confidence=0.65)
+        refined = make_candidate("c01", [0.11, 0.11, 0.21, 0.21], confidence=0.65)
         refined.fused_score = 0.70
         fusion = FusionResult([refined, initial], refined, {})
         guarded = _apply_false_repair_guard(
@@ -166,7 +166,7 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertAlmostEqual(guarded.evidence["comparable_initial_score"], 0.50)
 
     def test_false_repair_guard_accepts_independent_zoom_confirmation(self):
-        initial = make_candidate("c00", confidence=0.55)
+        initial = make_candidate("c00", bbox=[0.39, 0.39, 0.59, 0.59], confidence=0.55)
         initial.fused_score = 0.50
         refined = make_candidate("c01", [0.4, 0.4, 0.6, 0.6], confidence=0.45)
         refined.fused_score = 0.65
@@ -175,7 +175,11 @@ class ReleaseAuditTests(unittest.TestCase):
             bbox=[0.41, 0.41, 0.61, 0.61],
             source_agent="ZoomAgent",
             query_used="the car",
-            observation=Observation("zoom", "crop_zoom"),
+            observation=Observation(
+                "zoom",
+                "crop_zoom",
+                crop_region=[0.30, 0.30, 0.70, 0.70],
+            ),
             bbox_token_confidence=0.55,
             bbox_token_count=4,
             parent_candidate_id="c01",
@@ -194,6 +198,24 @@ class ReleaseAuditTests(unittest.TestCase):
             guarded.evidence["replacement_support_evidence"],
         )
         self.assertEqual(guarded.evidence["cross_view_partner_id"], "c02")
+
+    def test_false_repair_guard_rejects_identity_switch(self):
+        initial = make_candidate("c00", confidence=0.40)
+        initial.fused_score = 0.50
+        switched = make_candidate("c01", [0.70, 0.70, 0.80, 0.80], confidence=0.80)
+        switched.fused_score = 0.80
+        fusion = FusionResult([switched, initial], switched, {})
+        guarded = _apply_false_repair_guard(
+            fusion,
+            initial,
+            0.50,
+            AgenticConfig(),
+        )
+        self.assertEqual(guarded.final.candidate_id, "c00")
+        self.assertEqual(
+            guarded.evidence["false_repair_guard_reason"],
+            "identity_not_preserved",
+        )
 
     def test_target_candidate_cannot_self_certify_in_fusion(self):
         initial = make_candidate("c00", confidence=0.60)

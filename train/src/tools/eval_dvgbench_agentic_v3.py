@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-prompt-mode", default="none")
     parser.add_argument("--anchor-token-counts")
     parser.add_argument("--include-raw-output", action="store_true")
+    parser.add_argument(
+        "--code-revision",
+        default="unknown",
+        help="Immutable source revision recorded in the formal summary",
+    )
 
     parser.add_argument(
         "--max-specialized-unit-calls",
@@ -122,10 +127,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-diversity-iou-threshold", type=float, default=0.85)
     parser.add_argument("--max-target-tile-calls", type=int, default=2)
     parser.add_argument("--verification-confidence-threshold", type=float, default=0.35)
+    parser.add_argument("--verification-max-crop-area", type=float, default=0.90)
     parser.add_argument("--no-constraint-graph", action="store_true")
     parser.add_argument("--no-semantic-frame-protection", action="store_true")
     parser.add_argument("--no-false-repair-guard", action="store_true")
-    parser.add_argument("--false-repair-margin", type=float, default=0.02)
+    parser.add_argument("--false-repair-margin", type=float, default=0.05)
+    parser.add_argument(
+        "--replacement-identity-iou-threshold", type=float, default=0.50
+    )
     parser.add_argument("--replacement-confidence-threshold", type=float, default=0.60)
     parser.add_argument(
         "--replacement-confidence-gain-threshold", type=float, default=0.15
@@ -182,10 +191,12 @@ def build_agent_config(args: argparse.Namespace) -> AgenticConfig:
         target_diversity_iou_threshold=args.target_diversity_iou_threshold,
         max_target_tile_calls=args.max_target_tile_calls,
         verification_confidence_threshold=args.verification_confidence_threshold,
+        verification_max_crop_area=args.verification_max_crop_area,
         enable_constraint_graph=not args.no_constraint_graph,
         enable_semantic_frame_protection=not args.no_semantic_frame_protection,
         enable_false_repair_guard=not args.no_false_repair_guard,
         false_repair_margin=args.false_repair_margin,
+        replacement_identity_iou_threshold=(args.replacement_identity_iou_threshold),
         replacement_confidence_threshold=(args.replacement_confidence_threshold),
         replacement_confidence_gain_threshold=(
             args.replacement_confidence_gain_threshold
@@ -242,8 +253,21 @@ def _public_config(
     return {
         "query_field": args.query_field,
         "question_e_used": False,
-        "model_path": args.model_path,
-        "adapter_path": args.adapter_path,
+        "code_revision": args.code_revision,
+        "grounder": {
+            "model_path": args.model_path,
+            "adapter_path": args.adapter_path,
+            "device": args.device,
+            "torch_dtype": args.torch_dtype,
+            "attn_implementation": args.attn_implementation,
+            "max_new_tokens": args.max_new_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "prompt_mode": args.prompt_mode,
+            "anchor_model_id": args.anchor_model_id,
+            "anchor_prompt_mode": args.anchor_prompt_mode,
+            "anchor_token_counts": args.anchor_token_counts,
+        },
         "initial_predictions": args.initial_predictions,
         "agent": to_jsonable(agent_config),
     }

@@ -63,13 +63,15 @@ trace 在 `verification_evidence.fusion` 中记录 `comparable_initial_score`、
 
 Zoom 只是 single-image transformed observation view，不是真实多视角或多 UAV：
 
-1. object-relative query 优先使用 target/context 的 union crop，保留双方证据；
+1. Zoom 始终围绕被验证 target hypothesis 构造真实局部 crop，不再与大 context bbox 求 union，避免 road 等区域把 Zoom 退化成全图重跑；
 2. crop grounding 只接收去除全局方向、顺序和 target-context 关系后的 target clause；
-3. 左上、右下、全局方位和顺序约束始终由父控制器在局部框映射回原图后重新计算，绝不按 crop 坐标解释；
-4. Target 分区搜索使用带重叠的确定性 transformed observation views，并优先观察不包含 initial 中心的区域；
-5. 局部框映射回原图后执行 identity IoU/center、relation drop、global-position drop 三类 guard；
-6. Zoom 的 `parent_candidate_id` 与 `hypothesis_id` 明确绑定被验证根候选；
-7. trace 同时记录 `local_bbox`、`global_bbox`、crop region 和全局约束重应用标记。
+3. 全局方向、ordinal、context 与 relation 始终在局部 bbox 映射回原图后检查；
+4. 只有面积不超过 `verification_max_crop_area` 的真实 transformed view 才能计为独立支持，全图或近全图重复推理不会自证；
+5. Target 分区搜索使用带重叠的确定性 transformed observation views，并优先观察不包含 initial 中心的区域；
+6. 局部框映射回原图后执行 identity IoU/center、relation drop、global-position drop 三类 guard；
+7. final replacement 还必须保持与 initial 的 identity IoU；只有明确的 relation/global constraint gain 才允许跨目标重定位；
+8. Zoom 的 `parent_candidate_id` 与 `hypothesis_id` 明确绑定被验证根候选；
+9. trace 同时记录 `local_bbox`、`global_bbox`、crop region 和全局约束重应用标记。
 
 因此 crop 的局部置信度不能覆盖全局语义约束。
 
@@ -99,6 +101,7 @@ sample_id, image, query, class
 - `decision = accept | refine | escalate` 与 `stop_reason`；
 - 预算耗尽或观测不足时的 `human_feedback`；
 - 独立的 `evaluation`，其中才允许出现 GT 和 IoU；
+- summary 中固定记录 `code_revision`、模型/adapter、dtype、prompt mode 与 SAM/DINO anchor 配置，保证正式实验可复现；
 - `cost` 中的逻辑/实际 perception calls、specialized unit calls、初始/增量/端到端 latency 和 dispatch。
 
 `--feedback-mode base` 会在停止后调用去除 LoRA adapter 的同一基座生成自然语言反馈。动作由确定性安全策略先选定，基座只负责叙述，不能改变动作或给出数值飞行控制指令；不合规输出自动回退到模板。建议可包括保持上下文的降低高度/高分辨率观察、更宽上下文、侧向或斜视重观察、时序观察和人工复核。

@@ -26,7 +26,7 @@ from .schema import (
 )
 
 
-SCHEMA_VERSION = "dai-uav-agent-v4.0"
+SCHEMA_VERSION = "dai-uav-agent-v4.1"
 
 
 def _safe_fusion(
@@ -97,6 +97,10 @@ def _apply_false_repair_guard(
             candidate.candidate_id
             for candidate in fusion.ranked
             if candidate.source_agent == "ZoomAgent"
+            and candidate.observation.view_type == "crop_zoom"
+            and candidate.observation.crop_region is not None
+            and box_area(candidate.observation.crop_region)
+            <= config.verification_max_crop_area
             and (candidate.hypothesis_id or candidate.parent_candidate_id)
             == selected_hypothesis_id
             and candidate.bbox is not None
@@ -125,8 +129,23 @@ def _apply_false_repair_guard(
     ):
         evidence.append("global_constraint_gain")
 
-    replacement_supported = bool(evidence) and (
-        initial.bbox is None or score_improvement >= config.false_repair_margin
+    identity_iou = (
+        box_iou(selected.bbox, initial.bbox)
+        if selected.bbox is not None and initial.bbox is not None
+        else 0.0
+    )
+    constraint_relocation_supported = bool(
+        {"relation_constraint_gain", "global_constraint_gain"}.intersection(evidence)
+    )
+    identity_preserved = (
+        initial.bbox is None
+        or identity_iou >= config.replacement_identity_iou_threshold
+        or constraint_relocation_supported
+    )
+    replacement_supported = (
+        bool(evidence)
+        and (initial.bbox is None or score_improvement >= config.false_repair_margin)
+        and identity_preserved
     )
     fusion.evidence.update(
         {
@@ -138,6 +157,9 @@ def _apply_false_repair_guard(
             "replacement_confidence_gain": confidence_gain,
             "replacement_support_evidence": evidence,
             "cross_view_partner_id": cross_view_partner_id,
+            "replacement_identity_iou": identity_iou,
+            "replacement_identity_preserved": identity_preserved,
+            "constraint_relocation_supported": constraint_relocation_supported,
             "replacement_supported": replacement_supported,
         }
     )
@@ -176,9 +198,13 @@ def _apply_false_repair_guard(
         )
         fusion.evidence["false_repair_guard_applied"] = True
         fusion.evidence["false_repair_guard_reason"] = (
-            "missing_independent_replacement_evidence"
-            if score_improvement >= config.false_repair_margin
-            else "insufficient_comparable_score_gain"
+            "identity_not_preserved"
+            if not identity_preserved
+            else (
+                "missing_independent_replacement_evidence"
+                if score_improvement >= config.false_repair_margin
+                else "insufficient_comparable_score_gain"
+            )
         )
     else:
         fusion.evidence["false_repair_guard_applied"] = False

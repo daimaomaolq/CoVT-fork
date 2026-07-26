@@ -7,9 +7,8 @@ from ..geometry import (
     center_distance,
     expand_box,
     map_from_crop,
-    union_box,
 )
-from ..schema import AgentCall, Candidate, Observation, SpatialFrame, to_jsonable
+from ..schema import AgentCall, Candidate, Observation, to_jsonable
 from .base import AgentContext, AgentResult
 
 
@@ -18,17 +17,24 @@ def _ensure_minimum_crop(
 ) -> list[float]:
     x1, y1, x2, y2 = region
     width, height = x2 - x1, y2 - y1
-    if width >= minimum_size and height >= minimum_size:
-        return region
     center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
     width = max(width, minimum_size)
     height = max(height, minimum_size)
-    return [
-        max(0.0, center_x - width / 2),
-        max(0.0, center_y - height / 2),
-        min(1.0, center_x + width / 2),
-        min(1.0, center_y + height / 2),
-    ]
+    x1, x2 = center_x - width / 2, center_x + width / 2
+    y1, y2 = center_y - height / 2, center_y + height / 2
+    if x1 < 0.0:
+        x2 -= x1
+        x1 = 0.0
+    if x2 > 1.0:
+        x1 -= x2 - 1.0
+        x2 = 1.0
+    if y1 < 0.0:
+        y2 -= y1
+        y1 = 0.0
+    if y2 > 1.0:
+        y1 -= y2 - 1.0
+        y2 = 1.0
+    return [max(0.0, x1), max(0.0, y1), min(1.0, x2), min(1.0, y2)]
 
 
 def _crop_image(image: Image.Image, region: list[float]) -> Image.Image:
@@ -67,25 +73,14 @@ class ZoomAgent:
                 expand_box(seed.bbox, scale), context.config.zoom_min_crop_size
             )
             return region, False
-        object_relative = SpatialFrame.OBJECT_RELATIVE in context.graph.spatial_frames
-        valid_context = [
-            candidate
-            for candidate in context.context_candidates
-            if candidate.bbox is not None
-        ]
-        if object_relative and valid_context:
-            best_context = max(
-                valid_context, key=lambda item: item.bbox_token_confidence
-            )
-            region = union_box([seed.bbox, best_context.bbox])
-            region = expand_box(region, context.config.context_union_margin)
-            preserves_context = True
-        else:
-            region = expand_box(seed.bbox, scale)
-            preserves_context = not object_relative
+        # Zoom verifies one target hypothesis. Including a large context region
+        # (for example a road) can turn the crop back into the full image and
+        # falsely count an identical rerun as independent support. The parent
+        # re-applies context, relation and global constraints after remapping.
+        region = expand_box(seed.bbox, scale)
         return (
             _ensure_minimum_crop(region, context.config.zoom_min_crop_size),
-            preserves_context,
+            False,
         )
 
     def run(
@@ -146,12 +141,7 @@ class ZoomAgent:
         else:
             identity_distance = 1.0
             rejection_reasons.append("zoom_parse_failed")
-        if (
-            context.config.enable_semantic_frame_protection
-            and SpatialFrame.OBJECT_RELATIVE in context.graph.spatial_frames
-            and not preserves_context
-        ):
-            rejection_reasons.append("context_not_preserved")
+
         candidate.rejection_reasons.extend(rejection_reasons)
         candidate.accepted_by_guard = not rejection_reasons
         call = AgentCall(
@@ -178,6 +168,7 @@ class ZoomAgent:
                 "scale": scale,
                 "preserves_context": preserves_context,
                 "semantic_frame_protection": context.config.enable_semantic_frame_protection,
+                "relation_checked_in_global_frame": True,
             },
             output={
                 "local_bbox": local_bbox,
@@ -190,6 +181,9 @@ class ZoomAgent:
                 "rejection_reasons": rejection_reasons,
                 "hypothesis_id": candidate.hypothesis_id,
                 "verification_of": seed.candidate_id,
+                "independent_transformed_view": (
+                    box_area(crop_region) <= context.config.verification_max_crop_area
+                ),
             },
             model_call=True,
             perception_call=True,

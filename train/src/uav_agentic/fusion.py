@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .agents.relation_reasoner import absolute_position_score, apply_ordinal_scores
-from .geometry import box_iou, box_plausibility, center_distance
+from .geometry import box_area, box_iou, box_plausibility, center_distance
 from .schema import AgenticConfig, Candidate, QueryConstraintGraph, SpatialFrame
 
 
@@ -42,6 +42,16 @@ def _root_id(candidate: Candidate) -> str:
         candidate.hypothesis_id
         or candidate.parent_candidate_id
         or candidate.candidate_id
+    )
+
+
+def _is_independent_zoom(candidate: Candidate, config: AgenticConfig) -> bool:
+    observation = candidate.observation
+    return bool(
+        candidate.source_agent == "ZoomAgent"
+        and observation.view_type == "crop_zoom"
+        and observation.crop_region is not None
+        and box_area(observation.crop_region) <= config.verification_max_crop_area
     )
 
 
@@ -138,13 +148,18 @@ def rank_candidates(
             for candidate in members[1:]
             if candidate.accepted_by_guard and candidate.bbox is not None
         ]
+        independent_children = [
+            candidate
+            for candidate in accepted_children
+            if _is_independent_zoom(candidate, config)
+        ]
         stability = max(
-            (box_iou(root.bbox, candidate.bbox) for candidate in accepted_children),
+            (box_iou(root.bbox, candidate.bbox) for candidate in independent_children),
             default=0.0,
         )
         supporting_children = [
             candidate
-            for candidate in accepted_children
+            for candidate in independent_children
             if box_iou(root.bbox, candidate.bbox)
             >= config.replacement_cross_view_iou_threshold
             and root.bbox_token_confidence >= config.verification_confidence_threshold
@@ -174,6 +189,9 @@ def rank_candidates(
                 ],
                 "cross_view_iou": stability,
                 "cross_view_supported": cross_view_supported,
+                "independent_verification_ids": [
+                    item.candidate_id for item in independent_children
+                ],
                 "representative_candidate_id": representative.candidate_id,
                 "hypothesis_score": representative.fused_score,
             }
