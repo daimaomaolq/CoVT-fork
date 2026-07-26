@@ -26,7 +26,7 @@ from .schema import (
 )
 
 
-SCHEMA_VERSION = "dai-uav-agent-v5.1"
+SCHEMA_VERSION = "dai-uav-agent-v5.0"
 
 
 def _safe_fusion(

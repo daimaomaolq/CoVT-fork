@@ -34,7 +34,7 @@ train/src/tools/eval_dvgbench_agentic_v3.py
 
 预算 K 按 Target、Context、Zoom 的真实视觉模型调用逐次扣减，而不是按动作类型计数；Relation 是无视觉模型调用的结构化推理。运行时存在硬断言，任何路径超过 K 都会失败而不是静默超预算。
 
-v5 默认采用 K=5 的对称验证：initial 与 alternative 都必须接受保留隐式语义和 object-relative relation 的 semantic Zoom；只有 alternative 的跨视图验证强度显著高于 initial，或 relation/global constraint 明确改善时，才允许跨目标替换。 Zoom 仅移除全局坐标与 ordinal 词，避免局部 crop 破坏左上/右下等全图语义。 v5.1 进一步采用 verification-aware fusion：未验证搜索框只作为 proposal 保留在候选召回统计中，不能压过已经由独立 crop/zoom 视图验证的身份假设。
+v5 默认采用 K=5 的对称验证：initial 与 alternative 都必须接受保留隐式语义和 object-relative relation 的 semantic Zoom；只有 alternative 的跨视图验证强度显著高于 initial，或 relation/global constraint 明确改善时，才允许跨目标替换。 Zoom 仅移除全局坐标与 ordinal 词，避免局部 crop 破坏左上/右下等全图语义。
 
 候选融合不是 bbox 平均或无条件投票。默认权重为：
 

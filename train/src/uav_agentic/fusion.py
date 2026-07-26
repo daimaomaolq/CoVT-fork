@@ -215,11 +215,6 @@ def rank_candidates(
                 ],
                 "cross_view_iou": stability,
                 "cross_view_supported": cross_view_supported,
-                "verification_tier": (
-                    "independently_verified"
-                    if cross_view_supported
-                    else "unverified_proposal"
-                ),
                 "verification_strength": verification_strength,
                 "independent_verification_ids": [
                     item.candidate_id for item in independent_children
@@ -232,20 +227,9 @@ def rank_candidates(
     if not representatives:
         representatives = sorted(valid, key=lambda item: item.fused_score, reverse=True)
 
-    hypothesis_by_id = {item["hypothesis_id"]: item for item in hypotheses}
-
-    def _verification_aware_key(candidate: Candidate) -> tuple[bool, float]:
-        hypothesis = hypothesis_by_id.get(_root_id(candidate), {})
-        return (
-            bool(hypothesis.get("cross_view_supported", False)),
-            candidate.fused_score,
-        )
-
-    # Unverified search proposals remain useful for candidate-recall analysis,
-    # but cannot displace an independently verified identity hypothesis. If no
-    # hypothesis is verified, ranking falls back to the original score and the
-    # parent's false-repair guard still decides whether relocation is safe.
-    preliminary = sorted(representatives, key=_verification_aware_key, reverse=True)
+    preliminary = sorted(
+        representatives, key=lambda item: item.fused_score, reverse=True
+    )
     if len(preliminary) > 1:
         first, second = preliminary[:2]
         margin = first.fused_score - second.fused_score
@@ -258,7 +242,7 @@ def rank_candidates(
 
     ranked = sorted(
         [candidate for candidate in representatives if candidate.accepted_by_guard],
-        key=_verification_aware_key,
+        key=lambda item: item.fused_score,
         reverse=True,
     )
     if not ranked:
@@ -268,6 +252,7 @@ def rank_candidates(
         candidate.competition_margin = candidate.fused_score - next_score
     final = ranked[0]
 
+    hypothesis_by_id = {item["hypothesis_id"]: item for item in hypotheses}
     for item in hypotheses:
         representative = by_id.get(item["representative_candidate_id"])
         if representative is not None:
