@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+export PYTHONPATH="${REPO_ROOT}/train:${REPO_ROOT}/train/src:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
 : "${CANDIDATE_TRACE:?set CANDIDATE_TRACE to the completed v4.1 JSONL}"
 : "${DVBENCH_INDEX:?set DVBENCH_INDEX to the 873-row evaluation index}"
 : "${MODEL_PATH:?set MODEL_PATH}"

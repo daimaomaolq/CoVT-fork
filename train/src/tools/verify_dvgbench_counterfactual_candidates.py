@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+from PIL import Image
+
+SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from uav_agentic.counterfactual_candidate_selection import (
+    COUNTERFACTUAL_SCHEMA_VERSION,
+    CounterfactualConfig,
+    verify_counterfactual_candidates,
+)
+from uav_agentic.frozen_candidate_selection import FrozenBaseVisualVerifier
+from uav_agentic.grounder import GrounderSettings
+from uav_agentic.io import read_jsonl
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run v4.3 counterbalanced pairwise verification over frozen candidates. "
+            "GT and question_e are never read and final boxes are not regenerated."
+        )
+    )
+    parser.add_argument("--candidate-trace", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--model-path", required=True)
+    parser.add_argument("--adapter-path")
+    parser.add_argument("--image-root")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--torch-dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+    )
+    parser.add_argument("--attn-implementation", default="sdpa")
+    parser.add_argument("--anchor-model-id", default="[]")
+    parser.add_argument("--anchor-prompt-mode", default="none")
+    parser.add_argument("--anchor-token-counts")
+    parser.add_argument("--max-alternatives", type=int, default=1)
+    parser.add_argument("--duplicate-iou-threshold", type=float, default=0.92)
+    parser.add_argument("--maximum-initial-overlap", type=float, default=0.85)
+    parser.add_argument("--minimum-independent-gain", type=float, default=0.0)
+    parser.add_argument("--allow-parent-accepted", action="store_true")
+    parser.add_argument("--allow-unsupported", action="store_true")
+    parser.add_argument("--first-crop-scale", type=float, default=3.0)
+    parser.add_argument("--second-crop-scale", type=float, default=4.0)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--code-revision", default="unknown")
+    return parser.parse_args()
+
+
+def resolve_image(
+    row: dict,
+    trace_path: Path,
+    image_root: Path | None,
+) -> Path:
+    raw = str(row.get("image") or "").strip()
+    if not raw:
+        raise ValueError(f"Trace sample {row.get('sample_id')} has no image path")
+    value = Path(raw).expanduser()
+    candidates = [value]
+    if image_root is not None:
+        candidates.extend((image_root / value, image_root / value.name))
+    candidates.append(trace_path.parent / value)
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    raise FileNotFoundError(
+        f"Image for {row.get('sample_id')} not found; checked: "
+        + ", ".join(str(item) for item in candidates)
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    trace_path = Path(args.candidate_trace).expanduser().resolve()
+    output_path = Path(args.output).expanduser().resolve()
+    image_root = (
+        Path(args.image_root).expanduser().resolve() if args.image_root else None
+    )
+    traces = read_jsonl(trace_path, args.limit)
+    if not traces:
+        raise ValueError(f"No candidate traces found in {trace_path}")
+    for row in traces:
+        if row.get("inference", {}).get("question_e_used") is not False:
+            raise ValueError(
+                f"Unsafe trace {row.get('sample_id')}: question_e_used is not false"
+            )
+    config = CounterfactualConfig(
+        max_alternatives=args.max_alternatives,
+        duplicate_iou_threshold=args.duplicate_iou_threshold,
+        maximum_initial_overlap=args.maximum_initial_overlap,
+        minimum_independent_gain=args.minimum_independent_gain,
+        require_parent_unresolved=not args.allow_parent_accepted,
+        require_independent_support=not args.allow_unsupported,
+        first_crop_scale=args.first_crop_scale,
+        second_crop_scale=args.second_crop_scale,
+    )
+    config.validate()
+
+    completed: list[dict] = []
+    start = 0
+    if args.resume and output_path.is_file():
+        completed = read_jsonl(output_path)
+        if len(completed) > len(traces):
+            raise ValueError("Verifier output is longer than candidate trace")
+        for position, (sidecar, trace) in enumerate(zip(completed, traces), 1):
+            if sidecar.get("sample_id") != trace.get("sample_id"):
+                raise ValueError(f"Resume sample mismatch at row {position}")
+            if sidecar.get("question_e_used") is not False:
+                raise ValueError(f"Unsafe verifier sidecar at row {position}")
+            if sidecar.get("gt_visible") is not False:
+                raise ValueError(f"GT-visible verifier sidecar at row {position}")
+        start = len(completed)
+        print(f"[resume] validated {start}/{len(traces)} rows", flush=True)
+
+    pending = traces[start:]
+    verifier = None
+    if pending:
+        settings = GrounderSettings(
+            model_path=args.model_path,
+            adapter_path=args.adapter_path,
+            device=args.device,
+            torch_dtype=args.torch_dtype,
+            attn_implementation=args.attn_implementation,
+            max_new_tokens=12,
+            temperature=0.0,
+            prompt_mode="answer_only",
+            anchor_model_id=args.anchor_model_id,
+            anchor_prompt_mode=args.anchor_prompt_mode,
+            anchor_token_counts=args.anchor_token_counts,
+            include_raw_output=False,
+        )
+        verifier = FrozenBaseVisualVerifier.load(settings)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if start else "w"
+    with output_path.open(mode, encoding="utf-8") as handle:
+        for position, row in enumerate(pending, start + 1):
+            assert verifier is not None
+            image_path = resolve_image(row, trace_path, image_root)
+            with Image.open(image_path) as loaded:
+                image = loaded.convert("RGB")
+            result = verify_counterfactual_candidates(verifier, image, row, config)
+            result["candidate_trace"] = str(trace_path)
+            result["image"] = str(image_path)
+            result["code_revision"] = args.code_revision
+            result["protocol"] = {
+                "frozen_candidate_pool": True,
+                "final_bbox_regenerated": False,
+                "candidate_centric_transformed_views": True,
+                "single_source_image": True,
+                "counterbalanced_labels": True,
+                "self_reported_confidence_used": False,
+                "adapter_disabled_for_verification": True,
+                "question_e_used": False,
+                "gt_visible": False,
+            }
+            handle.write(json.dumps(result, ensure_ascii=False) + "\n")
+            handle.flush()
+            print(
+                f"[{position}/{len(traces)}] {result['sample_id']} "
+                f"status={result['status']} calls={result['model_calls']} "
+                f"winner={result.get('winner_candidate_id')}",
+                flush=True,
+            )
+
+    manifest = {
+        "schema_version": COUNTERFACTUAL_SCHEMA_VERSION,
+        "samples": len(traces),
+        "candidate_trace": str(trace_path),
+        "verifier_output": str(output_path),
+        "model_path": args.model_path,
+        "adapter_path_loaded_for_grounding_compatibility": args.adapter_path,
+        "adapter_disabled_for_verification": True,
+        "config": asdict(config),
+        "code_revision": args.code_revision,
+        "question_e_used": False,
+        "gt_visible": False,
+        "final_bbox_regenerated": False,
+        "self_reported_confidence_used": False,
+    }
+    manifest_path = output_path.with_suffix(".manifest.json")
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
