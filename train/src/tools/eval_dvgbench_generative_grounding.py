@@ -62,6 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="Kept for CLI symmetry; generation is sequential.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--image-min-pixels", type=int, default=200704)
+    parser.add_argument("--image-max-pixels", type=int, default=802816)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning", "i2e"))
@@ -381,25 +383,29 @@ def load_model(args: argparse.Namespace):
 
 
 def generate_one(model, processor, device, image_path: str, query: str, args: argparse.Namespace) -> str:
-    from PIL import Image
     import torch
-
-    image = Image.open(image_path).convert("RGB")
+    from qwen_vl_utils import process_vision_info
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": image_path},
+                {
+                    "type": "image",
+                    "image": image_path,
+                    "min_pixels": args.image_min_pixels,
+                    "max_pixels": args.image_max_pixels,
+                },
                 {"type": "text", "text": prompt_for_query(query, args.prompt_mode)},
             ],
         }
     ]
+    image_inputs, _ = process_vision_info(messages)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     anchor_model_ids = parse_anchor_model_ids(args.anchor_model_id)
     anchor_token_counts = parse_anchor_token_counts(anchor_model_ids, args.anchor_token_counts)
     anchor_prompt = build_anchor_prompt(anchor_model_ids, anchor_token_counts)
     text = insert_anchor_prompt(text, anchor_prompt, args.anchor_prompt_mode)
-    inputs = processor(text=[text], images=[image], return_tensors="pt")
+    inputs = processor(text=[text], images=image_inputs, return_tensors="pt")
     inputs = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in inputs.items()}
     with torch.no_grad():
         generated_ids = model.generate(

@@ -150,6 +150,8 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" train/src/tools/eval_dvgbench_generativ
   --adapter-path "$I2E_CKPT" \
   --output "$PRED" \
   --summary-output "$SUMMARY" \
+  --image-min-pixels "$IMAGE_MIN_PIXELS" \
+  --image-max-pixels "$IMAGE_MAX_PIXELS" \
   --query-field query \
   --prompt-mode i2e \
   --require-oracle-free-index \
