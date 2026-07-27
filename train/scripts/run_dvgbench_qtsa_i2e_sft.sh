@@ -9,10 +9,13 @@ DVG_GEN_ROOT="${DVG_GEN_ROOT:-$DVG_ROOT/generative_qwen_i2e}"
 RUN_ROOT="${RUN_ROOT:-/root/autodl-tmp/outputs/covt_uav_refpg_v8_cleanenv_20260527}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/hf_cache/hub/models--Wakals--CoVT-7B-seg_depth_dino/snapshots/154b974eb0d071160a4bc5b287f242bc2875b886}"
 QTSA_ROOT="${QTSA_ROOT:-$RUN_ROOT/checkpoints/dvgbench_generative_covt_segdino_querytail_warmstart_lora_v1}"
-OUT_DIR="${OUT_DIR:-$RUN_ROOT/checkpoints/dvgbench_qtsa_i2e_sft_v1}"
+RUN_TAG="${RUN_TAG:-v1}"
+OUT_DIR="${OUT_DIR:-$RUN_ROOT/checkpoints/dvgbench_qtsa_i2e_sft_$RUN_TAG}"
 PRED_DIR="${PRED_DIR:-$RUN_ROOT/predictions}"
 LOG_ROOT="${LOG_ROOT:-$RUN_ROOT/logs}"
 GPU_ID="${GPU_ID:-0}"
+IMAGE_MIN_PIXELS="${IMAGE_MIN_PIXELS:-200704}"
+IMAGE_MAX_PIXELS="${IMAGE_MAX_PIXELS:-802816}"
 
 mkdir -p "$DVG_GEN_ROOT" "$OUT_DIR" "$PRED_DIR" "$LOG_ROOT"
 cd "$REPO"
@@ -40,10 +43,10 @@ fi
 
 TRAIN_JSON="$DVG_GEN_ROOT/dvg_train_question_i2e_sft_mix50.json"
 TEST_INDEX="$DVG_GEN_ROOT/dvg_test_question_oracle_free_eval.jsonl"
-TRAIN_LOG="$LOG_ROOT/train_dvgbench_qtsa_i2e_sft_v1.log"
-EVAL_LOG="$LOG_ROOT/eval_dvgbench_qtsa_i2e_sft_v1.log"
-PRED="$PRED_DIR/dvgbench_qtsa_i2e_sft_v1.jsonl"
-SUMMARY="$PRED_DIR/dvgbench_qtsa_i2e_sft_v1.summary.json"
+TRAIN_LOG="$LOG_ROOT/train_dvgbench_qtsa_i2e_sft_$RUN_TAG.log"
+EVAL_LOG="$LOG_ROOT/eval_dvgbench_qtsa_i2e_sft_$RUN_TAG.log"
+PRED="$PRED_DIR/dvgbench_qtsa_i2e_sft_$RUN_TAG.jsonl"
+SUMMARY="$PRED_DIR/dvgbench_qtsa_i2e_sft_$RUN_TAG.summary.json"
 
 "$ENV_PY" train/src/tools/build_dvgbench_generative_sft.py \
   --input-jsonl "$DVG_ROOT/dvg_train.jsonl" \
@@ -85,6 +88,7 @@ PY
 export WANDB_DISABLED=true
 export WANDB_MODE=disabled
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 PYTHONPATH="$REPO/train:$REPO/train/src:$REPO/train/src/anchors" \
 CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" -m training.train \
@@ -96,6 +100,8 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" -m training.train \
   --anchor_token_counts "[8,4,4,4,4,4,4,4]" \
   --data_path "$TRAIN_JSON" \
   --image_folder "$DVG_IMAGE_ROOT" \
+  --image_min_pixels "$IMAGE_MIN_PIXELS" \
+  --image_max_pixels "$IMAGE_MAX_PIXELS" \
   --output_dir "$OUT_DIR" \
   --lora_weight_path "$QTSA_CKPT" \
   --anchor_prompt_mode query_tail \
@@ -173,7 +179,9 @@ comparison = {
     "i2e_improves_acc50": summary["Acc@0.5"] > baseline["Acc@0.5"],
     "i2e_improves_macro": summary["DVGBench_AVG"] > baseline["DVGBench_AVG"],
 }
-comparison_path = Path(sys.argv[1]).with_name("dvgbench_qtsa_i2e_sft_v1.comparison.json")
+comparison_path = Path(sys.argv[1]).with_name(
+    Path(sys.argv[1]).name.replace(".summary.json", ".comparison.json")
+)
 comparison_path.write_text(json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
 print(json.dumps(comparison, indent=2))
 PY
