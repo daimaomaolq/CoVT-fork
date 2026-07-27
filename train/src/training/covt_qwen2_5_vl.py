@@ -1000,9 +1000,11 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         
         # self.SD_token_projection = nn.Linear(3584, 64*64)
         
-    def get_anchor_model_ids(self, anchor_model_id):
+    def get_anchor_model_ids(self, anchor_model_id, load_anchor_teachers=True):
         self.anchor_model_id = anchor_model_id
-        self.anchor_models = AnchorModels(self.anchor_model_id)
+        self.anchor_models = (
+            AnchorModels(self.anchor_model_id) if load_anchor_teachers else None
+        )
         self.anchor_loss = AnchorLoss(self.anchor_loss_weight)
         
         if "sam" not in self.anchor_model_id:

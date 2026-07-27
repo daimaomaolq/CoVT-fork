@@ -298,9 +298,23 @@ def train():
     
     if len(anchor_loss_weight) != 8:
         raise ValueError("anchor_loss_weight must have 8 values: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip")
+    if not model_args.load_anchor_teachers:
+        if any(float(weight) != 0.0 for weight in anchor_loss_weight):
+            raise ValueError("anchor_loss_weight must be all zeros when load_anchor_teachers=False")
+        if training_args.vqa_only_stage >= 0:
+            raise ValueError("vqa_only_stage must be negative when load_anchor_teachers=False")
     model.anchor_loss_weight = anchor_loss_weight
-    model.get_anchor_model_ids(anchor_model_id)
-    print({"anchor_model_id": anchor_model_id, "anchor_loss_weight": anchor_loss_weight})
+    model.get_anchor_model_ids(
+        anchor_model_id,
+        load_anchor_teachers=model_args.load_anchor_teachers,
+    )
+    print(
+        {
+            "anchor_model_id": anchor_model_id,
+            "anchor_loss_weight": anchor_loss_weight,
+            "load_anchor_teachers": model_args.load_anchor_teachers,
+        }
+    )
     model.align_vqa_only_stage = training_args.vqa_only_stage
 
     model.config.use_cache = False

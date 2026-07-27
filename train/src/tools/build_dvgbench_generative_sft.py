@@ -31,8 +31,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         default="answer_only",
-        choices=("answer_only", "reasoning"),
-        help="Whether to supervise only bbox or pseudo reasoning plus bbox.",
+        choices=("answer_only", "reasoning", "i2e"),
+        help=(
+            "Supervision protocol. i2e maps an implicit query to the paired "
+            "explicit reference and then to the bbox."
+        ),
+    )
+    parser.add_argument(
+        "--explicit-field",
+        default="question_e",
+        choices=("question_e", "question_e_cn"),
+        help="Training-only explicit reference used by --mode i2e.",
+    )
+    parser.add_argument(
+        "--i2e-answer-only-copy-ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "For --mode i2e, add deterministic answer-only copies for this "
+            "fraction of source rows. This preserves bbox generation while "
+            "learning explicitization. Must be in [0,1]."
+        ),
+    )
+    parser.add_argument(
+        "--omit-oracle-fields-from-eval-index",
+        action="store_true",
+        help=(
+            "Do not write question_e/question_e_cn into the eval index. Use "
+            "this for the final implicit-query test index to make leakage "
+            "structurally impossible."
+        ),
     )
     parser.add_argument(
         "--image-path-mode",
@@ -162,12 +190,41 @@ def prompt_for_query(query: str, mode: str) -> str:
             "Think briefly about the referred object, then put the final bounding "
             "box in <answer>{<x1><y1><x2><y2>}</answer>."
         )
+    elif mode == "i2e":
+        suffix = (
+            "First convert the implicit request into one brief explicit visual "
+            "description of the same target using visible category, attribute, "
+            "position, context, or relation evidence. Then output its bounding "
+            "box. Respond exactly as:\n"
+            "<explicit>brief explicit description</explicit>\n"
+            "<answer>{<x1><y1><x2><y2>}</answer>"
+        )
     return f"<image>\nLocate the region described by: {query}\n{suffix}"
 
 
-def answer_for_bbox(bbox_text: str, query: str, mode: str) -> str:
+def answer_for_bbox(
+    bbox_text: str,
+    query: str,
+    mode: str,
+    explicit_reference: str | None = None,
+) -> str:
     if mode == "answer_only":
         return bbox_text
+    if mode == "i2e":
+        explicit_reference = clean_text(explicit_reference)
+        if not explicit_reference:
+            raise ValueError("I2E supervision requires a non-empty explicit reference.")
+        explicit_reference = (
+            explicit_reference.replace("<explicit>", "")
+            .replace("</explicit>", "")
+            .replace("<answer>", "")
+            .replace("</answer>", "")
+            .strip()
+        )
+        return (
+            f"<explicit>{explicit_reference}</explicit>\n"
+            f"<answer>{bbox_text}</answer>"
+        )
     return (
         "<think>The query refers to a UAV scene region. I identify the target by "
         "its category, spatial relation, and surrounding context.</think>"
@@ -203,6 +260,11 @@ def write_eval_index(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     args = parse_args()
+    if not (0.0 <= args.i2e_answer_only_copy_ratio <= 1.0):
+        raise ValueError("--i2e-answer-only-copy-ratio must be in [0,1].")
+    if args.mode != "i2e" and args.i2e_answer_only_copy_ratio:
+        raise ValueError("--i2e-answer-only-copy-ratio is only valid with --mode i2e.")
+
     image_root = Path(args.image_root).expanduser().resolve()
     image_folder = Path(args.image_folder).expanduser().resolve() if args.image_folder else image_root
     raw_rows = load_rows(Path(args.input_jsonl).expanduser().resolve())
@@ -211,14 +273,28 @@ def main() -> None:
     if args.limit is not None:
         raw_rows = raw_rows[: args.limit]
 
-    sft_rows: list[dict[str, Any]] = []
+    sft_groups: list[list[dict[str, Any]]] = []
     eval_rows: list[dict[str, Any]] = []
-    stats: dict[str, int] = {"input": len(raw_rows), "written": 0, "missing_image": 0, "missing_query": 0, "bad_bbox": 0}
+    stats: dict[str, int] = {
+        "input": len(raw_rows),
+        "written": 0,
+        "source_rows_written": 0,
+        "answer_only_copies": 0,
+        "missing_image": 0,
+        "missing_query": 0,
+        "missing_explicit": 0,
+        "bad_bbox": 0,
+    }
+    copy_rng = random.Random(args.seed + 1)
 
     for idx, row in enumerate(raw_rows):
         query = clean_text(row.get(args.query_field))
         if not query:
             stats["missing_query"] += 1
+            continue
+        explicit_reference = clean_text(row.get(args.explicit_field))
+        if args.mode == "i2e" and not explicit_reference:
+            stats["missing_explicit"] += 1
             continue
         image_path = resolve_image(row, image_root)
         if image_path is None:
@@ -241,53 +317,102 @@ def main() -> None:
         image_id = clean_text(row.get("image_id")) or image_path.name
         sample_id = (
             f"dvgbench_gen_{idx:06d}_{safe_id(row.get('dataset'), 'dataset')}_"
-            f"{safe_id(question_id, str(idx))}_{safe_id(Path(image_id).stem, str(idx))}_{args.query_field}"
+            f"{safe_id(question_id, str(idx))}_{safe_id(Path(image_id).stem, str(idx))}_"
+            f"{args.query_field}"
         )
-        sft_rows.append(
+        if args.mode == "i2e":
+            sample_id += "_i2e"
+        group = [
             {
                 "id": sample_id,
                 "image": image_value,
                 "conversations": [
                     {"from": "human", "value": prompt_for_query(query, args.mode)},
-                    {"from": "gpt", "value": answer_for_bbox(bbox_text, query, args.mode)},
+                    {
+                        "from": "gpt",
+                        "value": answer_for_bbox(
+                            bbox_text,
+                            query,
+                            args.mode,
+                            explicit_reference=explicit_reference,
+                        ),
+                    },
                 ],
+                "metadata": {
+                    "protocol": args.mode,
+                    "source_question_id": question_id,
+                    "explicit_supervision_train_only": args.mode == "i2e",
+                },
             }
-        )
-        eval_rows.append(
-            {
-                "sample_id": sample_id,
-                "image": str(image_path),
-                "image_rel": image_value,
-                "query": query,
-                "answer": bbox_text,
-                "bbox": bbox,
-                "bbox_norm": bbox_norm(bbox, width, height),
-                "question": clean_text(row.get("question")),
-                "question_e": clean_text(row.get("question_e")),
-                "dataset": clean_text(row.get("dataset")),
-                "category": clean_text(row.get("class")) or "unknown",
-                "split": clean_text(row.get("split")),
-                "image_id": image_id,
-                "question_id": question_id,
-                "source": "DVGBench",
-                "task_type": "generative_grounding",
-                "task_tag": f"dvgbench_{args.query_field}_generative",
-                "image_size": [width, height],
-            }
-        )
-        stats["written"] += 1
+        ]
+        stats["source_rows_written"] += 1
+
+        if (
+            args.mode == "i2e"
+            and args.i2e_answer_only_copy_ratio > 0.0
+            and copy_rng.random() < args.i2e_answer_only_copy_ratio
+        ):
+            group.append(
+                {
+                    "id": sample_id + "_answer_only_copy",
+                    "image": image_value,
+                    "conversations": [
+                        {"from": "human", "value": prompt_for_query(query, "answer_only")},
+                        {"from": "gpt", "value": answer_for_bbox(bbox_text, query, "answer_only")},
+                    ],
+                    "metadata": {
+                        "protocol": "answer_only_preservation",
+                        "source_question_id": question_id,
+                        "explicit_supervision_train_only": False,
+                    },
+                }
+            )
+            stats["answer_only_copies"] += 1
+
+        sft_groups.append(group)
+        stats["written"] += len(group)
+
+        eval_row = {
+            "sample_id": sample_id,
+            "image": str(image_path),
+            "image_rel": image_value,
+            "query": query,
+            "answer": bbox_text,
+            "bbox": bbox,
+            "bbox_norm": bbox_norm(bbox, width, height),
+            "question": clean_text(row.get("question")),
+            "dataset": clean_text(row.get("dataset")),
+            "category": clean_text(row.get("class")) or "unknown",
+            "split": clean_text(row.get("split")),
+            "image_id": image_id,
+            "question_id": question_id,
+            "source": "DVGBench",
+            "task_type": "generative_grounding",
+            "task_tag": f"dvgbench_{args.query_field}_generative",
+            "image_size": [width, height],
+            "oracle_fields_present": not args.omit_oracle_fields_from_eval_index,
+        }
+        if not args.omit_oracle_fields_from_eval_index:
+            eval_row["question_e"] = clean_text(row.get("question_e"))
+            eval_row["question_e_cn"] = clean_text(row.get("question_e_cn"))
+        eval_rows.append(eval_row)
 
     if args.validation_split:
         if not (0.0 < args.validation_split < 1.0):
             raise ValueError("--validation-split must be in [0, 1).")
         if not args.val_output:
             raise ValueError("--val-output is required when --validation-split > 0.")
-        split_at = max(1, round(len(sft_rows) * (1.0 - args.validation_split)))
-        write_json(Path(args.output).expanduser().resolve(), sft_rows[:split_at])
-        write_json(Path(args.val_output).expanduser().resolve(), sft_rows[split_at:])
-        stats["train_written"] = split_at
-        stats["val_written"] = len(sft_rows) - split_at
+        split_at = max(1, round(len(sft_groups) * (1.0 - args.validation_split)))
+        train_rows = [item for group in sft_groups[:split_at] for item in group]
+        val_rows = [item for group in sft_groups[split_at:] for item in group]
+        write_json(Path(args.output).expanduser().resolve(), train_rows)
+        write_json(Path(args.val_output).expanduser().resolve(), val_rows)
+        stats["train_source_rows"] = split_at
+        stats["val_source_rows"] = len(sft_groups) - split_at
+        stats["train_written"] = len(train_rows)
+        stats["val_written"] = len(val_rows)
     else:
+        sft_rows = [item for group in sft_groups for item in group]
         write_json(Path(args.output).expanduser().resolve(), sft_rows)
 
     if args.write_eval_index:

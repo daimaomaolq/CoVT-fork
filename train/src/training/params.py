@@ -10,6 +10,15 @@ class ModelArguments:
     model_path: Optional[str] = field(default="Qwen/Qwen2.5-VL-7B-Instruct")
     anchor_model_id: str = field(default=None, metadata={"help": "List of anchor model ids"})
     anchor_loss_weight: str = field(default='[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]', metadata={"help": "List of anchor loss weights: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip"})
+    load_anchor_teachers: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Load external SAM/DINO/etc. teacher networks. Disable for "
+                "language-only continuation from an already aligned QTSA checkpoint."
+            )
+        },
+    )
     anchor_tokens: str = field(default='[64, 64, 64, 64, 64, 64, 64, 64]', metadata={"help": "List of anchor tokens"})
 
     # LLava specific parameters

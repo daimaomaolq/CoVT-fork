@@ -5,6 +5,7 @@ import ast
 import json
 import re
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True, help="CoVT/Qwen model path or merged checkpoint.")
     parser.add_argument("--adapter-path", default=None, help="Optional PEFT LoRA adapter path.")
     parser.add_argument("--output", required=True, help="Prediction JSONL path.")
+    parser.add_argument(
+        "--summary-output",
+        default=None,
+        help="Summary JSON path. Defaults to <output stem>.summary.json.",
+    )
+    parser.add_argument(
+        "--require-oracle-free-index",
+        action="store_true",
+        help="Fail if question_e/question_e_cn exists in any evaluation row.",
+    )
     parser.add_argument("--query-field", default="query", help="Index field used as prompt query.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--torch-dtype", default="auto", choices=("auto", "float16", "bfloat16", "float32"))
@@ -53,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
-    parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning"))
+    parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning", "i2e"))
     parser.add_argument(
         "--anchor-model-id",
         default="[]",
@@ -109,13 +120,23 @@ def prompt_for_query(query: str, mode: str) -> str:
     if mode == "reasoning":
         return (
             f"Locate the region described by: {query}\n"
-            "Think briefly and put the final bounding box in <answer>{<x1><y1><x2><y2>}</answer>."
+            "Think briefly and put the final bounding box in "
+            "<answer>{<x1><y1><x2><y2>}</answer>."
+        )
+    if mode == "i2e":
+        return (
+            f"Locate the region described by: {query}\n"
+            "First convert the implicit request into one brief explicit visual "
+            "description of the same target using visible category, attribute, "
+            "position, context, or relation evidence. Then output its bounding "
+            "box. Respond exactly as:\n"
+            "<explicit>brief explicit description</explicit>\n"
+            "<answer>{<x1><y1><x2><y2>}</answer>"
         )
     return (
         f"Locate the region described by: {query}\n"
         "Output only the bounding box in the format {<x1><y1><x2><y2>}."
     )
-
 
 
 ANCHOR_TOKEN_BY_ID = {
@@ -233,6 +254,18 @@ def anchor_token_indices(processor) -> list[int]:
         tokenizer_single_id(processor.tokenizer, SIGLIP_PAD_TOKEN),
         tokenizer_single_id(processor.tokenizer, METACLIP_PAD_TOKEN),
     ]
+
+def parse_explicit_text(text: str) -> str | None:
+    match = re.search(
+        r"<explicit>\s*(.*?)\s*</explicit>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return None
+    explicit = re.sub(r"\s+", " ", match.group(1)).strip()
+    return explicit or None
+
 
 def parse_bbox_text(text: str) -> list[float] | None:
     answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL | re.IGNORECASE)
@@ -384,15 +417,39 @@ def generate_one(model, processor, device, image_path: str, query: str, args: ar
 
 def main() -> None:
     args = parse_args()
+    forbidden_query_fields = {"question_e", "question_e_cn"}
+    if args.query_field.lower() in forbidden_query_fields:
+        raise ValueError("Final implicit-query evaluation cannot use an explicit oracle field.")
+
     rows = read_jsonl(Path(args.index).expanduser().resolve(), args.limit)
+    if args.require_oracle_free_index:
+        contaminated = [
+            str(row.get("sample_id", index))
+            for index, row in enumerate(rows)
+            if any(field in row for field in forbidden_query_fields)
+        ]
+        if contaminated:
+            raise ValueError(
+                "Evaluation index contains forbidden oracle fields; first contaminated sample: "
+                + contaminated[0]
+            )
+
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path = (
+        Path(args.summary_output).expanduser().resolve()
+        if args.summary_output
+        else output_path.with_suffix(".summary.json")
+    )
     model, processor, device = load_model(args)
 
     total = 0
     iou_sum = 0.0
     acc50 = 0
     parse_failed = 0
+    explicit_parse_failed = 0
+    explicit_lengths: list[int] = []
+    latency_seconds: list[float] = []
     per_class_total: dict[str, int] = defaultdict(int)
     per_class_acc: dict[str, int] = defaultdict(int)
 
@@ -400,10 +457,20 @@ def main() -> None:
         for row in rows:
             sample_id = str(row["sample_id"])
             query = str(row.get(args.query_field) or row.get("query") or "")
+            started_at = time.perf_counter()
             raw_output = generate_one(model, processor, device, str(row["image"]), query, args)
+            latency_seconds.append(time.perf_counter() - started_at)
             pred_bbox = parse_bbox_text(raw_output)
+            explicit_prediction = parse_explicit_text(raw_output) if args.prompt_mode == "i2e" else None
             if pred_bbox is None:
                 parse_failed += 1
+            if args.prompt_mode == "i2e":
+                if explicit_prediction is None:
+                    explicit_parse_failed += 1
+                else:
+                    explicit_lengths.append(len(explicit_prediction.split()))
+
+            # GT is accessed only after generation and is never passed to the model.
             gt_bbox = [float(v) for v in row["bbox_norm"][:4]]
             iou = box_iou(pred_bbox, gt_bbox)
             cls = str(row.get("category") or row.get("class") or "unknown").strip() or "unknown"
@@ -416,26 +483,43 @@ def main() -> None:
             handle.write(
                 json.dumps(
                     {
+                        "schema_version": "dvgbench-qtsa-i2e-sft-v1",
                         "sample_id": sample_id,
                         "bbox": pred_bbox,
                         "gt_bbox": gt_bbox,
                         "iou": iou,
                         "class": cls,
                         "query": query,
+                        "explicit_prediction": explicit_prediction,
                         "raw_output": raw_output,
                         "parse_ok": pred_bbox is not None,
+                        "explicit_parse_ok": (
+                            explicit_prediction is not None if args.prompt_mode == "i2e" else None
+                        ),
+                        "latency_seconds": latency_seconds[-1],
+                        "protocol": {
+                            "prompt_mode": args.prompt_mode,
+                            "query_field": args.query_field,
+                            "question_e_used": False,
+                            "gt_visible_during_inference": False,
+                        },
                     },
                     ensure_ascii=False,
                 )
                 + "\n"
             )
-            print(f"[{total}/{len(rows)}] iou={iou:.4f} parse={pred_bbox is not None} {sample_id}", flush=True)
+            print(
+                f"[{total}/{len(rows)}] iou={iou:.4f} bbox_parse={pred_bbox is not None} "
+                f"explicit_parse={explicit_prediction is not None} {sample_id}",
+                flush=True,
+            )
 
     class_acc = {
         key: per_class_acc[key] / max(per_class_total[key], 1)
         for key in sorted(per_class_total)
     }
     result = {
+        "schema_version": "dvgbench-qtsa-i2e-sft-v1",
         "samples": total,
         "mIoU": iou_sum / max(total, 1),
         "Acc@0.5": acc50 / max(total, 1),
@@ -443,8 +527,37 @@ def main() -> None:
         "class_Acc@0.5": class_acc,
         "class_counts": dict(sorted(per_class_total.items())),
         "parse_failed": parse_failed,
+        "explicit_parse_failed": explicit_parse_failed if args.prompt_mode == "i2e" else None,
+        "explicit_format_rate": (
+            (total - explicit_parse_failed) / max(total, 1)
+            if args.prompt_mode == "i2e"
+            else None
+        ),
+        "mean_explicit_words": (
+            sum(explicit_lengths) / len(explicit_lengths) if explicit_lengths else None
+        ),
+        "mean_latency_seconds": (
+            sum(latency_seconds) / len(latency_seconds) if latency_seconds else 0.0
+        ),
+        "total_latency_seconds": sum(latency_seconds),
         "predictions": str(output_path),
+        "config": {
+            "model_path": args.model_path,
+            "adapter_path": args.adapter_path,
+            "prompt_mode": args.prompt_mode,
+            "query_field": args.query_field,
+            "anchor_model_id": parse_anchor_model_ids(args.anchor_model_id),
+            "anchor_prompt_mode": args.anchor_prompt_mode,
+            "question_e_used": False,
+            "gt_visible_during_inference": False,
+            "oracle_free_index_required": args.require_oracle_free_index,
+        },
     }
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
