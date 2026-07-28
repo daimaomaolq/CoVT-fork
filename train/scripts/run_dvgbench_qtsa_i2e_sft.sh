@@ -9,7 +9,7 @@ DVG_GEN_ROOT="${DVG_GEN_ROOT:-$DVG_ROOT/generative_qwen_i2e}"
 RUN_ROOT="${RUN_ROOT:-/root/autodl-tmp/outputs/covt_uav_refpg_v8_cleanenv_20260527}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/hf_cache/hub/models--Wakals--CoVT-7B-seg_depth_dino/snapshots/154b974eb0d071160a4bc5b287f242bc2875b886}"
 QTSA_ROOT="${QTSA_ROOT:-$RUN_ROOT/checkpoints/dvgbench_generative_covt_segdino_querytail_warmstart_lora_v1}"
-RUN_TAG="${RUN_TAG:-v1}"
+RUN_TAG="${RUN_TAG:-v2_official_i2e}"
 OUT_DIR="${OUT_DIR:-$RUN_ROOT/checkpoints/dvgbench_qtsa_i2e_sft_$RUN_TAG}"
 PRED_DIR="${PRED_DIR:-$RUN_ROOT/predictions}"
 LOG_ROOT="${LOG_ROOT:-$RUN_ROOT/logs}"
@@ -106,11 +106,11 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" -m training.train \
   --lora_weight_path "$QTSA_CKPT" \
   --anchor_prompt_mode query_tail \
   --anchor_response_mode none \
+  --train_anchor_adapters False \
   --num_train_epochs 1 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 16 \
-  --learning_rate 5e-6 \
-  --projection_layer_lr 5e-6 \
+  --learning_rate 3e-6 \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \
   --lr_scheduler_type cosine \

@@ -323,8 +323,9 @@ def train():
     if "Qwen" in model_args.model_id:
         configure_vision_tower(model_to_configure, training_args, compute_dtype, training_args.device)
     
-    # Set requires_grad for the Anchor projection layers
-    set_anchor_requires_grad(model, anchor_model_id)
+    # Preserve already aligned QTSA perception modules during language-only I2E continuation.
+    if training_args.train_anchor_adapters:
+        set_anchor_requires_grad(model, anchor_model_id)
     
     if training_args.bits in [4,8]:
         model.config.torch_dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
@@ -362,13 +363,14 @@ def train():
             rank0_print("Adding LoRA to the model...")
             model = get_peft_model(model, peft_config)
         
-        for name, param in model.named_parameters():
-            if '_projection' in name:
-                param.requires_grad = True
-            if 'cross_attention' in name:
-                param.requires_grad = True
-            if '_query_vectors' in name:
-                param.requires_grad = True
+        if training_args.train_anchor_adapters:
+            for name, param in model.named_parameters():
+                if '_projection' in name:
+                    param.requires_grad = True
+                if 'cross_attention' in name:
+                    param.requires_grad = True
+                if '_query_vectors' in name:
+                    param.requires_grad = True
         # model.print_trainable_parameters()
     processor = AutoProcessor.from_pretrained(model_args.model_id,
                                             # The default setting is padding_side="left"
@@ -416,6 +418,19 @@ def train():
     model.get_anchor_token_idx(sam_token_idx, dino_token_idx, depth_token_idx, sd_token_idx, intern_token_idx, pidinet_token_idx, siglip_token_idx, metaclip_token_idx)
     if training_args.lora_enable and training_args.lora_weight_path:
         load_non_lora_warmstart(model, training_args.lora_weight_path)
+    if not training_args.train_anchor_adapters:
+        anchor_markers = ("_projection", "cross_attention", "_query_vectors")
+        leaked_anchor_parameters = [
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad and any(marker in name for marker in anchor_markers)
+        ]
+        if leaked_anchor_parameters:
+            raise RuntimeError(
+                "QTSA anchor parameters unexpectedly remain trainable: "
+                + ", ".join(leaked_anchor_parameters[:12])
+            )
+        rank0_print({"status": "anchor_adapters_frozen_for_i2e"})
     
     if "llava" in model_args.model_id:
         configure_llava_vision_tower(model_to_configure, model_args, training_args, compute_dtype, processor)

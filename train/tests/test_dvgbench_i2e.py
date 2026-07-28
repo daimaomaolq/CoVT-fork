@@ -40,15 +40,49 @@ def test_i2e_prompt_target_and_parser() -> None:
         "i2e",
         explicit_reference="the white car on the left",
     )
+    assert "<think>" in prompt
     assert "<explicit>" in prompt
     assert "<answer>" in prompt
     assert target == (
+        "<think>I interpret the implicit request and identify the same target from "
+        "visible scene evidence: the white car on the left.</think>\n"
         "<explicit>the white car on the left</explicit>\n"
         "<answer>{<100><200><300><400>}</answer>"
     )
     assert evaluator.parse_explicit_text(target) == "the white car on the left"
     assert evaluator.parse_bbox_text(target) == [0.1, 0.2, 0.3, 0.4]
 
+
+def test_non_lora_prefix_mapping_loads_anchor_weights() -> None:
+    class Tensor:
+        shape = (2, 2)
+
+    class Incompatible:
+        missing_keys = ["unrelated.weight"]
+        unexpected_keys = []
+
+    class Model:
+        def __init__(self) -> None:
+            self.loaded = {}
+
+        def state_dict(self):
+            return {"sam_projection.weight": Tensor()}
+
+        def load_state_dict(self, state_dict, strict=False):
+            assert strict is False
+            self.loaded = state_dict
+            return Incompatible()
+
+    model = Model()
+    stats = evaluator.load_matching_non_lora_state(
+        model,
+        {"base_model.model.sam_projection.weight": Tensor()},
+        "checkpoint/non_lora_state_dict.bin",
+    )
+    assert list(model.loaded) == ["sam_projection.weight"]
+    assert stats["loaded"] == 1
+    assert stats["skipped"] == 0
+    assert stats["anchor_loaded"] == 1
 
 def test_i2e_builder_and_oracle_free_eval_index(tmp_path: Path, monkeypatch) -> None:
     image_root = tmp_path / "images"
@@ -108,6 +142,7 @@ def test_i2e_builder_and_oracle_free_eval_index(tmp_path: Path, monkeypatch) -> 
     assert len(train_rows) == 2
     assert train_rows[0]["metadata"]["protocol"] == "i2e"
     assert train_rows[1]["metadata"]["protocol"] == "answer_only_preservation"
+    assert "<think>" in train_rows[0]["conversations"][1]["value"]
     assert "<explicit>the white vehicle at the upper left</explicit>" in (
         train_rows[0]["conversations"][1]["value"]
     )

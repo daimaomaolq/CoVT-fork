@@ -82,6 +82,15 @@ class TrainingArguments(TrainingArguments):
     # Anchor Model New Parameters
     training_stage: str = field(default="full", metadata={"help": "Training stage, should be one of `start` or `full`."})
     projection_layer_lr: Optional[float] = None
+    train_anchor_adapters: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Train QTSA anchor projections/cross-attention/query vectors. "
+                "Disable for language-only I2E continuation to preserve alignment."
+            )
+        },
+    )
     vqa_only_stage: int = field(default=4000, metadata={"help": "VQA only stage."})
 
 

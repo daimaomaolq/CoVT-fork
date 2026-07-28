@@ -192,10 +192,12 @@ def prompt_for_query(query: str, mode: str) -> str:
         )
     elif mode == "i2e":
         suffix = (
-            "First convert the implicit request into one brief explicit visual "
-            "description of the same target using visible category, attribute, "
-            "position, context, or relation evidence. Then output its bounding "
-            "box. Respond exactly as:\n"
+            "Output the thinking process in <think> </think>, a brief explicit "
+            "description of the referred object using visible category, color, "
+            "size, relative position, context, or relation evidence in "
+            "<explicit> </explicit>, and the final bounding box in "
+            "<answer> </answer> tags. Respond exactly as:\n"
+            "<think>brief visual reasoning</think>\n"
             "<explicit>brief explicit description</explicit>\n"
             "<answer>{<x1><y1><x2><y2>}</answer>"
         )
@@ -221,7 +223,12 @@ def answer_for_bbox(
             .replace("</answer>", "")
             .strip()
         )
+        rationale = (
+            "I interpret the implicit request and identify the same target from "
+            f"visible scene evidence: {explicit_reference}."
+        )
         return (
+            f"<think>{rationale}</think>\n"
             f"<explicit>{explicit_reference}</explicit>\n"
             f"<answer>{bbox_text}</answer>"
         )

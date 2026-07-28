@@ -128,10 +128,12 @@ def prompt_for_query(query: str, mode: str) -> str:
     if mode == "i2e":
         return (
             f"Locate the region described by: {query}\n"
-            "First convert the implicit request into one brief explicit visual "
-            "description of the same target using visible category, attribute, "
-            "position, context, or relation evidence. Then output its bounding "
-            "box. Respond exactly as:\n"
+            "Output the thinking process in <think> </think>, a brief explicit "
+            "description of the referred object using visible category, color, "
+            "size, relative position, context, or relation evidence in "
+            "<explicit> </explicit>, and the final bounding box in "
+            "<answer> </answer> tags. Respond exactly as:\n"
+            "<think>brief visual reasoning</think>\n"
             "<explicit>brief explicit description</explicit>\n"
             "<answer>{<x1><y1><x2><y2>}</answer>"
         )
@@ -257,6 +259,58 @@ def anchor_token_indices(processor) -> list[int]:
         tokenizer_single_id(processor.tokenizer, METACLIP_PAD_TOKEN),
     ]
 
+
+def _state_key_candidates(key: str) -> list[str]:
+    candidates = [key]
+    prefix = "base_model.model."
+    if key.startswith(prefix):
+        candidates.append(key[len(prefix) :])
+    else:
+        candidates.append(prefix + key)
+    return candidates
+
+
+def load_matching_non_lora_state(model, state_dict: dict, source: str) -> dict:
+    model_state = model.state_dict()
+    filtered = {}
+    skipped = []
+    for key, value in state_dict.items():
+        matched_key = next(
+            (
+                candidate
+                for candidate in _state_key_candidates(key)
+                if candidate in model_state
+                and tuple(model_state[candidate].shape) == tuple(value.shape)
+            ),
+            None,
+        )
+        if matched_key is None:
+            skipped.append(key)
+        else:
+            filtered[matched_key] = value
+
+    incompatible = model.load_state_dict(filtered, strict=False)
+    anchor_loaded = sum(
+        any(marker in key for marker in ("_projection", "cross_attention", "_query_vectors"))
+        for key in filtered
+    )
+    stats = {
+        "status": "loaded_non_lora_state",
+        "path": source,
+        "loaded": len(filtered),
+        "skipped": len(skipped),
+        "anchor_loaded": anchor_loaded,
+        "missing_after_load": len(incompatible.missing_keys),
+        "unexpected_after_load": len(incompatible.unexpected_keys),
+        "skipped_examples": skipped[:8],
+    }
+    if skipped or incompatible.unexpected_keys:
+        raise RuntimeError(f"Non-LoRA checkpoint key mismatch: {stats}")
+    if not filtered or anchor_loaded == 0:
+        raise RuntimeError(f"Non-LoRA checkpoint loaded no QTSA anchor parameters: {stats}")
+    print(json.dumps(stats, ensure_ascii=False), flush=True)
+    return stats
+
 def parse_explicit_text(text: str) -> str | None:
     match = re.search(
         r"<explicit>\s*(.*?)\s*</explicit>",
@@ -360,23 +414,15 @@ def load_model(args: argparse.Namespace):
     if args.adapter_path:
         from peft import PeftModel
 
+        model = PeftModel.from_pretrained(model, args.adapter_path)
         non_lora_path = Path(args.adapter_path) / "non_lora_state_dict.bin"
         if non_lora_path.is_file():
             non_lora_state = torch.load(non_lora_path, map_location="cpu")
-            missing, unexpected = model.load_state_dict(non_lora_state, strict=False)
-            print(
-                json.dumps(
-                    {
-                        "status": "loaded_non_lora_state",
-                        "path": str(non_lora_path),
-                        "missing": len(missing),
-                        "unexpected": len(unexpected),
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
+            load_matching_non_lora_state(
+                model,
+                non_lora_state,
+                str(non_lora_path),
             )
-        model = PeftModel.from_pretrained(model, args.adapter_path)
     model.to(device)
     model.eval()
     return model, processor, device
@@ -489,7 +535,7 @@ def main() -> None:
             handle.write(
                 json.dumps(
                     {
-                        "schema_version": "dvgbench-qtsa-i2e-sft-v1",
+                        "schema_version": "dvgbench-qtsa-i2e-sft-v2",
                         "sample_id": sample_id,
                         "bbox": pred_bbox,
                         "gt_bbox": gt_bbox,
@@ -525,7 +571,7 @@ def main() -> None:
         for key in sorted(per_class_total)
     }
     result = {
-        "schema_version": "dvgbench-qtsa-i2e-sft-v1",
+        "schema_version": "dvgbench-qtsa-i2e-sft-v2",
         "samples": total,
         "mIoU": iou_sum / max(total, 1),
         "Acc@0.5": acc50 / max(total, 1),
@@ -554,6 +600,8 @@ def main() -> None:
             "query_field": args.query_field,
             "anchor_model_id": parse_anchor_model_ids(args.anchor_model_id),
             "anchor_prompt_mode": args.anchor_prompt_mode,
+            "image_min_pixels": args.image_min_pixels,
+            "image_max_pixels": args.image_max_pixels,
             "question_e_used": False,
             "gt_visible_during_inference": False,
             "oracle_free_index_required": args.require_oracle_free_index,
