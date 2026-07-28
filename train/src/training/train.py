@@ -389,7 +389,9 @@ def train():
     old_processor_len = len(processor.tokenizer)
         
     # add special tokens
-    add_tokens = [SAM_PAD_TOKEN, DINO_PAD_TOKEN, DEPTH_PAD_TOKEN, SD_PAD_TOKEN, INTERN_PAD_TOKEN, PIDINET_PAD_TOKEN, SIGLIP_PAD_TOKEN, METACLIP_PAD_TOKEN, "<think>", "</think>", "<explicit>", "</explicit>", "<answer>", "</answer>"]
+    add_tokens = [SAM_PAD_TOKEN, DINO_PAD_TOKEN, DEPTH_PAD_TOKEN, SD_PAD_TOKEN, INTERN_PAD_TOKEN, PIDINET_PAD_TOKEN, SIGLIP_PAD_TOKEN, METACLIP_PAD_TOKEN]
+    if training_args.add_i2e_schema_tokens:
+        add_tokens.extend(["<think>", "</think>", "<explicit>", "</explicit>", "<answer>", "</answer>"])
     processor.tokenizer.add_special_tokens({"additional_special_tokens": [ANCHOR_START_TOKEN, ANCHOR_END_TOKEN]})
     processor.tokenizer.add_tokens(add_tokens)
     sam_token_idx = processor.tokenizer(SAM_PAD_TOKEN, add_special_tokens=False).input_ids[0]
@@ -401,10 +403,6 @@ def train():
     siglip_token_idx = processor.tokenizer(SIGLIP_PAD_TOKEN, add_special_tokens=False).input_ids[0]
     metaclip_token_idx = processor.tokenizer(METACLIP_PAD_TOKEN, add_special_tokens=False).input_ids[0]
     
-    think_idx = processor.tokenizer("<think>", add_special_tokens=False).input_ids[0]
-    splash_think_idx = processor.tokenizer("</think>", add_special_tokens=False).input_ids[0]
-    answer_idx = processor.tokenizer("<answer>", add_special_tokens=False).input_ids[0]
-    splash_answer_idx = processor.tokenizer("</answer>", add_special_tokens=False).input_ids[0]
     
     qwen_embed = model.get_input_embeddings()
     lm_head = model.get_output_embeddings()

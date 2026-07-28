@@ -108,6 +108,15 @@ class TrainingArguments(TrainingArguments):
         default=1.0,
         metadata={"help": "Loss multiplier for I2E structural tag tokens."},
     )
+    add_i2e_schema_tokens: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Register <think>/<explicit>/<answer> as new tokenizer rows. "
+                "Disable for plain-text I2E protocols that use only existing tokens."
+            )
+        },
+    )
     vqa_only_stage: int = field(default=4000, metadata={"help": "VQA only stage."})
 
 
