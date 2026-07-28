@@ -9,7 +9,7 @@ DVG_GEN_ROOT="${DVG_GEN_ROOT:-$DVG_ROOT/generative_qwen_i2e}"
 RUN_ROOT="${RUN_ROOT:-/root/autodl-tmp/outputs/covt_uav_refpg_v8_cleanenv_20260527}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/hf_cache/hub/models--Wakals--CoVT-7B-seg_depth_dino/snapshots/154b974eb0d071160a4bc5b287f242bc2875b886}"
 QTSA_ROOT="${QTSA_ROOT:-$RUN_ROOT/checkpoints/dvgbench_generative_covt_segdino_querytail_warmstart_lora_v1}"
-RUN_TAG="${RUN_TAG:-v2_official_i2e}"
+RUN_TAG="${RUN_TAG:-v3_full_three_task_guarded}"
 OUT_DIR="${OUT_DIR:-$RUN_ROOT/checkpoints/dvgbench_qtsa_i2e_sft_$RUN_TAG}"
 PRED_DIR="${PRED_DIR:-$RUN_ROOT/predictions}"
 LOG_ROOT="${LOG_ROOT:-$RUN_ROOT/logs}"
@@ -41,7 +41,7 @@ if [[ -z "$QTSA_CKPT" || ! -f "$QTSA_CKPT/adapter_model.safetensors" ]]; then
   exit 2
 fi
 
-TRAIN_JSON="$DVG_GEN_ROOT/dvg_train_question_i2e_sft_mix50.json"
+TRAIN_JSON="$DVG_GEN_ROOT/dvg_train_question_i2e_three_task.json"
 TEST_INDEX="$DVG_GEN_ROOT/dvg_test_question_oracle_free_eval.jsonl"
 TRAIN_LOG="$LOG_ROOT/train_dvgbench_qtsa_i2e_sft_$RUN_TAG.log"
 EVAL_LOG="$LOG_ROOT/eval_dvgbench_qtsa_i2e_sft_$RUN_TAG.log"
@@ -55,7 +55,8 @@ SUMMARY="$PRED_DIR/dvgbench_qtsa_i2e_sft_$RUN_TAG.summary.json"
   --query-field question \
   --explicit-field question_e \
   --mode i2e \
-  --i2e-answer-only-copy-ratio 0.5 \
+  --i2e-answer-only-copy-ratio 1.0 \
+  --i2e-explicit-only-copy-ratio 1.0 \
   --shuffle \
   --seed 20260727 \
   --output "$TRAIN_JSON"
@@ -78,6 +79,9 @@ from pathlib import Path
 train = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 test = [json.loads(line) for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line.strip()]
 assert sum(row["metadata"]["protocol"] == "i2e" for row in train) == 1990
+assert sum(row["metadata"]["protocol"] == "answer_only_preservation" for row in train) == 1990
+assert sum(row["metadata"]["protocol"] == "implicit_to_explicit_auxiliary" for row in train) == 1990
+assert len(train) == 5970
 assert len(test) == 873
 assert len({row["sample_id"] for row in test}) == 873
 assert all("question_e" not in row and "question_e_cn" not in row for row in test)
@@ -107,14 +111,17 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" -m training.train \
   --anchor_prompt_mode query_tail \
   --anchor_response_mode none \
   --train_anchor_adapters False \
+  --compact_non_lora_checkpoint True \
+  --i2e_answer_token_weight 5.0 \
+  --i2e_format_token_weight 8.0 \
   --num_train_epochs 1 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 16 \
-  --learning_rate 3e-6 \
+  --learning_rate 1e-5 \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \
   --lr_scheduler_type cosine \
-  --save_strategy epoch \
+  --save_strategy no \
   --save_total_limit 1 \
   --logging_steps 10 \
   --bf16 True \
@@ -154,6 +161,7 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" train/src/tools/eval_dvgbench_generativ
   --image-max-pixels "$IMAGE_MAX_PIXELS" \
   --query-field query \
   --prompt-mode i2e \
+  --i2e-schema-guard \
   --require-oracle-free-index \
   --anchor-model-id "['sam','dino']" \
   --anchor-prompt-mode query_tail \
@@ -169,17 +177,36 @@ import sys
 from pathlib import Path
 
 summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-baseline = {
-    "mIoU": 0.33379627010060053,
-    "Acc@0.5": 0.32989690721649484,
-    "DVGBench_AVG": 0.36270966618744965,
+baselines = {
+    "matched_fixed_loader": {
+        "mIoU": 0.32589248236596774,
+        "Acc@0.5": 0.3230240549828179,
+        "DVGBench_AVG": 0.35870769347166687,
+    },
+    "old_full_resolution_formal": {
+        "mIoU": 0.33379627010060053,
+        "Acc@0.5": 0.32989690721649484,
+        "DVGBench_AVG": 0.36270966618744965,
+    },
 }
+metrics = tuple(baselines["matched_fixed_loader"])
 comparison = {
-    "baseline": baseline,
-    "i2e": {key: summary[key] for key in baseline},
-    "delta": {key: summary[key] - baseline[key] for key in baseline},
-    "i2e_improves_acc50": summary["Acc@0.5"] > baseline["Acc@0.5"],
-    "i2e_improves_macro": summary["DVGBench_AVG"] > baseline["DVGBench_AVG"],
+    "baselines": baselines,
+    "i2e": {key: summary[key] for key in metrics},
+    "delta": {
+        name: {key: summary[key] - values[key] for key in metrics}
+        for name, values in baselines.items()
+    },
+    "raw_schema_format_rate": summary.get("raw_schema_format_rate"),
+    "guarded_schema_format_rate": summary.get("schema_format_rate"),
+    "schema_guard_applied": summary.get("schema_guard_applied"),
+    "i2e_improves_matched_acc50": (
+        summary["Acc@0.5"] > baselines["matched_fixed_loader"]["Acc@0.5"]
+    ),
+    "i2e_improves_matched_macro": (
+        summary["DVGBench_AVG"]
+        > baselines["matched_fixed_loader"]["DVGBench_AVG"]
+    ),
 }
 comparison_path = Path(sys.argv[1]).with_name(
     Path(sys.argv[1]).name.replace(".summary.json", ".comparison.json")
