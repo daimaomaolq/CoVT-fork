@@ -53,6 +53,34 @@ def test_i2e_prompt_target_and_parser() -> None:
     assert evaluator.parse_bbox_text(target) == [0.1, 0.2, 0.3, 0.4]
 
 
+def test_i2e_schema_guard_repairs_tags_without_changing_bbox() -> None:
+    malformed = (
+        '<think>I resolve the clue.</think>\n'
+        '<explicit>A big van on the right side of the image><<answer>'
+        '{523><506><575><545}</elementGuidId>\n<|im_end|>'
+    )
+    before = evaluator.parse_bbox_text(malformed)
+    guarded, applied, reason = evaluator.guard_i2e_schema(malformed)
+
+    assert applied is True
+    assert reason == "repaired_tag_boundaries"
+    assert evaluator.parse_explicit_text(guarded) == (
+        "A big van on the right side of the image"
+    )
+    assert evaluator.parse_bbox_text(guarded) == before
+    assert guarded.endswith("<answer>{<523><506><575><545>}</answer>")
+
+    valid = (
+        "<think>reason</think>\n"
+        "<explicit>white car</explicit>\n"
+        "<answer>{<1><2><3><4>}</answer>"
+    )
+    unchanged, applied, reason = evaluator.guard_i2e_schema(valid)
+    assert unchanged == valid
+    assert applied is False
+    assert reason is None
+
+
 def test_non_lora_prefix_mapping_loads_anchor_weights() -> None:
     class Tensor:
         shape = (2, 2)

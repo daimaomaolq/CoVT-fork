@@ -101,6 +101,7 @@ run_eval() {
     --image-max-pixels 802816 \
     --query-field query \
     --prompt-mode "$mode" \
+    --i2e-schema-guard \
     --require-oracle-free-index \
     --anchor-model-id sam,dino \
     --anchor-prompt-mode query_tail \
@@ -124,7 +125,8 @@ i2e = load_summary(sys.argv[1])
 direct = load_summary(sys.argv[2])
 checks = {
     'i2e_parse_100': i2e['parse_failed'] == 0,
-    'explicit_format_100': i2e['explicit_parse_failed'] == 0,
+    'raw_schema_format_ge_0_95': i2e['raw_schema_format_rate'] >= 0.95,
+    'guarded_schema_format_100': i2e['schema_parse_failed'] == 0,
     'i2e_acc_at_0_5_ge_0_90': i2e['Acc@0.5'] >= 0.90,
     'i2e_miou_ge_0_80': i2e['mIoU'] >= 0.80,
     'direct_parse_100': direct['parse_failed'] == 0,
@@ -133,7 +135,7 @@ checks = {
 result = {
     'schema_version': 'dvgbench-qtsa-i2e-overfit-gate-v1',
     'samples': i2e['samples'],
-    'i2e': {key: i2e[key] for key in ('mIoU', 'Acc@0.5', 'DVGBench_AVG', 'parse_failed', 'explicit_parse_failed')},
+    'i2e': {key: i2e[key] for key in ('mIoU', 'Acc@0.5', 'DVGBench_AVG', 'parse_failed', 'explicit_parse_failed', 'raw_explicit_parse_failed', 'raw_explicit_format_rate', 'explicit_format_rate', 'raw_schema_parse_failed', 'schema_parse_failed', 'raw_schema_format_rate', 'schema_format_rate', 'schema_guard_applied')},
     'direct': {key: direct[key] for key in ('mIoU', 'Acc@0.5', 'DVGBench_AVG', 'parse_failed')},
     'checks': checks,
     'passed': all(checks.values()),

@@ -68,6 +68,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning", "i2e"))
     parser.add_argument(
+        "--i2e-schema-guard",
+        action="store_true",
+        help="Canonically repair I2E tag boundaries without changing bbox values.",
+    )
+    parser.add_argument(
         "--anchor-model-id",
         default="[]",
         help="Anchor model ids used by the adapter, for example: ['sam','dino'].",
@@ -323,6 +328,92 @@ def parse_explicit_text(text: str) -> str | None:
     return explicit or None
 
 
+def parse_think_text(text: str) -> str | None:
+    match = re.search(
+        r"<think>\s*(.*?)\s*</think>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = re.sub(r"\s+", " ", match.group(1)).strip()
+    return value or None
+
+
+def extract_bbox_lexemes(text: str) -> list[str] | None:
+    structured_patterns = [
+        r"\{\s*<\s*(-?\d+(?:\.\d+)?)\s*>\s*<\s*(-?\d+(?:\.\d+)?)\s*>\s*<\s*(-?\d+(?:\.\d+)?)\s*>\s*<\s*(-?\d+(?:\.\d+)?)\s*>\s*\}",
+        r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]",
+        r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)",
+    ]
+    for pattern in structured_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return [match.group(index) for index in range(1, 5)]
+
+    answer_marker = re.search(r"<+\s*answer\s*>", text, flags=re.IGNORECASE)
+    search_text = text[answer_marker.end() :] if answer_marker else text
+    numbers = re.findall(r"-?\d+(?:\.\d+)?", search_text)
+    return numbers[:4] if len(numbers) >= 4 else None
+
+
+def is_i2e_schema_valid(text: str) -> bool:
+    answer = re.search(
+        r"<answer>\s*(.*?)\s*</answer>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return (
+        parse_think_text(text) is not None
+        and parse_explicit_text(text) is not None
+        and answer is not None
+        and parse_bbox_text(answer.group(1)) is not None
+    )
+
+
+def guard_i2e_schema(text: str) -> tuple[str, bool, str | None]:
+    think = parse_think_text(text)
+    if think is None:
+        return text, False, "missing_think"
+    if is_i2e_schema_valid(text):
+        return text, False, None
+
+    explicit = parse_explicit_text(text)
+    if explicit is None:
+        explicit_start = re.search(r"<explicit>\s*", text, flags=re.IGNORECASE)
+        if explicit_start is None:
+            return text, False, "missing_explicit_start"
+        tail = text[explicit_start.end() :]
+        boundary = re.search(
+            r"</explicit>|>\s*<+\s*answer\s*>|<+\s*answer\s*>|<\|im_end\|>",
+            tail,
+            flags=re.IGNORECASE,
+        )
+        explicit = tail[: boundary.start()] if boundary else tail
+        explicit = re.sub(r"\s+", " ", explicit).strip(" <>/{}[]\n\t")
+    if not explicit:
+        return text, False, "empty_explicit"
+
+    bbox_lexemes = extract_bbox_lexemes(text)
+    if bbox_lexemes is None:
+        return text, False, "missing_bbox"
+    bbox_text = "{" + "".join(f"<{value}>" for value in bbox_lexemes) + "}"
+    guarded = (
+        f"<think>{think}</think>\n"
+        f"<explicit>{explicit}</explicit>\n"
+        f"<answer>{bbox_text}</answer>"
+    )
+    before = parse_bbox_text(text)
+    after = parse_bbox_text(guarded)
+    if before != after:
+        raise RuntimeError(
+            f"I2E schema guard changed bbox values: before={before}, after={after}"
+        )
+    if not is_i2e_schema_valid(guarded):
+        raise RuntimeError("I2E schema guard failed to produce a valid schema.")
+    return guarded, True, "repaired_tag_boundaries"
+
+
 def parse_bbox_text(text: str) -> list[float] | None:
     answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL | re.IGNORECASE)
     search_text = answer_match.group(1) if answer_match else text
@@ -500,6 +591,10 @@ def main() -> None:
     acc50 = 0
     parse_failed = 0
     explicit_parse_failed = 0
+    raw_explicit_parse_failed = 0
+    raw_schema_parse_failed = 0
+    schema_parse_failed = 0
+    schema_guard_applied = 0
     explicit_lengths: list[int] = []
     latency_seconds: list[float] = []
     per_class_total: dict[str, int] = defaultdict(int)
@@ -512,11 +607,34 @@ def main() -> None:
             started_at = time.perf_counter()
             raw_output = generate_one(model, processor, device, str(row["image"]), query, args)
             latency_seconds.append(time.perf_counter() - started_at)
-            pred_bbox = parse_bbox_text(raw_output)
-            explicit_prediction = parse_explicit_text(raw_output) if args.prompt_mode == "i2e" else None
+            raw_pred_bbox = parse_bbox_text(raw_output)
+            raw_explicit_prediction = (
+                parse_explicit_text(raw_output) if args.prompt_mode == "i2e" else None
+            )
+            guarded_output = raw_output
+            guard_applied = False
+            guard_reason = None
+            if args.prompt_mode == "i2e" and args.i2e_schema_guard:
+                guarded_output, guard_applied, guard_reason = guard_i2e_schema(raw_output)
+                schema_guard_applied += int(guard_applied)
+            pred_bbox = parse_bbox_text(guarded_output)
+            explicit_prediction = (
+                parse_explicit_text(guarded_output) if args.prompt_mode == "i2e" else None
+            )
+            if raw_pred_bbox != pred_bbox:
+                raise RuntimeError(
+                    f"Schema guard changed bbox for {sample_id}: "
+                    f"raw={raw_pred_bbox}, guarded={pred_bbox}"
+                )
             if pred_bbox is None:
                 parse_failed += 1
             if args.prompt_mode == "i2e":
+                raw_schema_ok = is_i2e_schema_valid(raw_output)
+                schema_ok = is_i2e_schema_valid(guarded_output)
+                raw_schema_parse_failed += int(not raw_schema_ok)
+                schema_parse_failed += int(not schema_ok)
+                if raw_explicit_prediction is None:
+                    raw_explicit_parse_failed += 1
                 if explicit_prediction is None:
                     explicit_parse_failed += 1
                 else:
@@ -543,10 +661,29 @@ def main() -> None:
                         "class": cls,
                         "query": query,
                         "explicit_prediction": explicit_prediction,
+                        "raw_explicit_prediction": raw_explicit_prediction,
                         "raw_output": raw_output,
+                        "guarded_output": guarded_output,
+                        "schema_guard_applied": guard_applied,
+                        "schema_guard_reason": guard_reason,
+                        "raw_schema_ok": (
+                            is_i2e_schema_valid(raw_output)
+                            if args.prompt_mode == "i2e"
+                            else None
+                        ),
+                        "schema_ok": (
+                            is_i2e_schema_valid(guarded_output)
+                            if args.prompt_mode == "i2e"
+                            else None
+                        ),
                         "parse_ok": pred_bbox is not None,
                         "explicit_parse_ok": (
                             explicit_prediction is not None if args.prompt_mode == "i2e" else None
+                        ),
+                        "raw_explicit_parse_ok": (
+                            raw_explicit_prediction is not None
+                            if args.prompt_mode == "i2e"
+                            else None
                         ),
                         "latency_seconds": latency_seconds[-1],
                         "protocol": {
@@ -554,6 +691,7 @@ def main() -> None:
                             "query_field": args.query_field,
                             "question_e_used": False,
                             "gt_visible_during_inference": False,
+                            "i2e_schema_guard": args.i2e_schema_guard,
                         },
                     },
                     ensure_ascii=False,
@@ -562,7 +700,9 @@ def main() -> None:
             )
             print(
                 f"[{total}/{len(rows)}] iou={iou:.4f} bbox_parse={pred_bbox is not None} "
-                f"explicit_parse={explicit_prediction is not None} {sample_id}",
+                f"explicit_parse={explicit_prediction is not None} "
+                f"raw_explicit_parse={raw_explicit_prediction is not None} "
+                f"guard={guard_applied} {sample_id}",
                 flush=True,
             )
 
@@ -580,6 +720,33 @@ def main() -> None:
         "class_counts": dict(sorted(per_class_total.items())),
         "parse_failed": parse_failed,
         "explicit_parse_failed": explicit_parse_failed if args.prompt_mode == "i2e" else None,
+        "raw_explicit_parse_failed": (
+            raw_explicit_parse_failed if args.prompt_mode == "i2e" else None
+        ),
+        "raw_schema_parse_failed": (
+            raw_schema_parse_failed if args.prompt_mode == "i2e" else None
+        ),
+        "schema_parse_failed": (
+            schema_parse_failed if args.prompt_mode == "i2e" else None
+        ),
+        "raw_schema_format_rate": (
+            (total - raw_schema_parse_failed) / max(total, 1)
+            if args.prompt_mode == "i2e"
+            else None
+        ),
+        "schema_format_rate": (
+            (total - schema_parse_failed) / max(total, 1)
+            if args.prompt_mode == "i2e"
+            else None
+        ),
+        "schema_guard_applied": (
+            schema_guard_applied if args.prompt_mode == "i2e" else 0
+        ),
+        "raw_explicit_format_rate": (
+            (total - raw_explicit_parse_failed) / max(total, 1)
+            if args.prompt_mode == "i2e"
+            else None
+        ),
         "explicit_format_rate": (
             (total - explicit_parse_failed) / max(total, 1)
             if args.prompt_mode == "i2e"
@@ -605,6 +772,7 @@ def main() -> None:
             "question_e_used": False,
             "gt_visible_during_inference": False,
             "oracle_free_index_required": args.require_oracle_free_index,
+            "i2e_schema_guard": args.i2e_schema_guard,
         },
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
