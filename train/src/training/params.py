@@ -91,6 +91,14 @@ class TrainingArguments(TrainingArguments):
             )
         },
     )
+    i2e_answer_token_weight: float = field(
+        default=1.0,
+        metadata={"help": "Loss multiplier for <answer>...</answer> tokens."},
+    )
+    i2e_format_token_weight: float = field(
+        default=1.0,
+        metadata={"help": "Loss multiplier for I2E structural tag tokens."},
+    )
     vqa_only_stage: int = field(default=4000, metadata={"help": "VQA only stage."})
 
 

@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--i2e-explicit-only-copy-ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "For --mode i2e, add deterministic implicit-to-explicit auxiliary "
+            "copies for this fraction of source rows. Must be in [0,1]."
+        ),
+    )
+    parser.add_argument(
         "--omit-oracle-fields-from-eval-index",
         action="store_true",
         help=(
@@ -223,10 +232,8 @@ def answer_for_bbox(
             .replace("</answer>", "")
             .strip()
         )
-        rationale = (
-            "I interpret the implicit request and identify the same target from "
-            f"visible scene evidence: {explicit_reference}."
-        )
+        rationale = explicit_reference
+
         return (
             f"<think>{rationale}</think>\n"
             f"<explicit>{explicit_reference}</explicit>\n"
@@ -269,8 +276,12 @@ def main() -> None:
     args = parse_args()
     if not (0.0 <= args.i2e_answer_only_copy_ratio <= 1.0):
         raise ValueError("--i2e-answer-only-copy-ratio must be in [0,1].")
-    if args.mode != "i2e" and args.i2e_answer_only_copy_ratio:
-        raise ValueError("--i2e-answer-only-copy-ratio is only valid with --mode i2e.")
+    if not (0.0 <= args.i2e_explicit_only_copy_ratio <= 1.0):
+        raise ValueError("--i2e-explicit-only-copy-ratio must be in [0,1].")
+    if args.mode != "i2e" and (
+        args.i2e_answer_only_copy_ratio or args.i2e_explicit_only_copy_ratio
+    ):
+        raise ValueError("I2E auxiliary copy ratios require --mode i2e.")
 
     image_root = Path(args.image_root).expanduser().resolve()
     image_folder = Path(args.image_folder).expanduser().resolve() if args.image_folder else image_root
@@ -287,12 +298,14 @@ def main() -> None:
         "written": 0,
         "source_rows_written": 0,
         "answer_only_copies": 0,
+        "explicit_only_copies": 0,
         "missing_image": 0,
         "missing_query": 0,
         "missing_explicit": 0,
         "bad_bbox": 0,
     }
     copy_rng = random.Random(args.seed + 1)
+    explicit_rng = random.Random(args.seed + 2)
 
     for idx, row in enumerate(raw_rows):
         query = clean_text(row.get(args.query_field))
@@ -375,6 +388,37 @@ def main() -> None:
                 }
             )
             stats["answer_only_copies"] += 1
+
+        if (
+            args.mode == "i2e"
+            and args.i2e_explicit_only_copy_ratio > 0.0
+            and explicit_rng.random() < args.i2e_explicit_only_copy_ratio
+        ):
+            explicit_prompt = (
+                f"<image>\nConvert the implicit request into a brief explicit visual "
+                f"description of the same target: {query}\n"
+                "Respond exactly as: <explicit>brief explicit description</explicit>"
+            )
+            cleaned_explicit = clean_text(explicit_reference)
+            group.append(
+                {
+                    "id": sample_id + "_explicit_only_copy",
+                    "image": image_value,
+                    "conversations": [
+                        {"from": "human", "value": explicit_prompt},
+                        {
+                            "from": "gpt",
+                            "value": f"<explicit>{cleaned_explicit}</explicit>",
+                        },
+                    ],
+                    "metadata": {
+                        "protocol": "implicit_to_explicit_auxiliary",
+                        "source_question_id": question_id,
+                        "explicit_supervision_train_only": True,
+                    },
+                }
+            )
+            stats["explicit_only_copies"] += 1
 
         sft_groups.append(group)
         stats["written"] += len(group)

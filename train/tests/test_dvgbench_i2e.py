@@ -44,8 +44,7 @@ def test_i2e_prompt_target_and_parser() -> None:
     assert "<explicit>" in prompt
     assert "<answer>" in prompt
     assert target == (
-        "<think>I interpret the implicit request and identify the same target from "
-        "visible scene evidence: the white car on the left.</think>\n"
+        "<think>the white car on the left</think>\n"
         "<explicit>the white car on the left</explicit>\n"
         "<answer>{<100><200><300><400>}</answer>"
     )
@@ -130,6 +129,8 @@ def test_i2e_builder_and_oracle_free_eval_index(tmp_path: Path, monkeypatch) -> 
             "i2e",
             "--i2e-answer-only-copy-ratio",
             "1.0",
+            "--i2e-explicit-only-copy-ratio",
+            "1.0",
             "--omit-oracle-fields-from-eval-index",
             "--write-eval-index",
             str(index),
@@ -139,9 +140,13 @@ def test_i2e_builder_and_oracle_free_eval_index(tmp_path: Path, monkeypatch) -> 
 
     train_rows = json.loads(output.read_text(encoding="utf-8"))
     eval_row = json.loads(index.read_text(encoding="utf-8"))
-    assert len(train_rows) == 2
+    assert len(train_rows) == 3
     assert train_rows[0]["metadata"]["protocol"] == "i2e"
     assert train_rows[1]["metadata"]["protocol"] == "answer_only_preservation"
+    assert train_rows[2]["metadata"]["protocol"] == "implicit_to_explicit_auxiliary"
+    assert train_rows[2]["conversations"][1]["value"] == (
+        "<explicit>the white vehicle at the upper left</explicit>"
+    )
     assert "<think>" in train_rows[0]["conversations"][1]["value"]
     assert "<explicit>the white vehicle at the upper left</explicit>" in (
         train_rows[0]["conversations"][1]["value"]

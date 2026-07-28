@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from transformers import Trainer, TrainerCallback
 from transformers.trainer import (
@@ -56,6 +57,101 @@ class QwenTrainer(Trainer):
     def evaluation_loop(self, dataloader, description, prediction_loss_only = None, ignore_keys = None, metric_key_prefix = "eval"):
         print("I got it! Maybe for future usage")
         return super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix)
+
+    def _token_sequence(self, text):
+        return self.processor.tokenizer(
+            text,
+            add_special_tokens=False,
+        ).input_ids
+
+    @staticmethod
+    def _sequence_starts(tokens, pattern):
+        if not pattern or len(pattern) > len(tokens):
+            return []
+        return [
+            index
+            for index in range(len(tokens) - len(pattern) + 1)
+            if tokens[index : index + len(pattern)] == pattern
+        ]
+
+    def _i2e_token_weights(self, labels):
+        answer_weight = float(self.args.i2e_answer_token_weight)
+        format_weight = float(self.args.i2e_format_token_weight)
+        weights = torch.ones_like(labels, dtype=torch.float32)
+        if answer_weight == 1.0 and format_weight == 1.0:
+            return weights
+
+        tag_patterns = [
+            self._token_sequence(tag)
+            for tag in (
+                "<think>",
+                "</think>",
+                "<explicit>",
+                "</explicit>",
+                "<answer>",
+                "</answer>",
+            )
+        ]
+        answer_start = tag_patterns[4]
+        answer_end = tag_patterns[5]
+        for row_index in range(labels.shape[0]):
+            tokens = labels[row_index].tolist()
+            starts = self._sequence_starts(tokens, answer_start)
+            if starts:
+                start = starts[0]
+                ends = [
+                    index
+                    for index in self._sequence_starts(tokens, answer_end)
+                    if index >= start
+                ]
+                end = ends[0] + len(answer_end) if ends else len(tokens)
+                weights[row_index, start:end] = answer_weight
+            if format_weight != 1.0:
+                for pattern in tag_patterns:
+                    for start in self._sequence_starts(tokens, pattern):
+                        end = start + len(pattern)
+                        weights[row_index, start:end] = torch.clamp_min(
+                            weights[row_index, start:end],
+                            format_weight,
+                        )
+        return weights
+
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+    ):
+        if (
+            float(self.args.i2e_answer_token_weight) == 1.0
+            and float(self.args.i2e_format_token_weight) == 1.0
+        ):
+            return super().compute_loss(
+                model,
+                inputs,
+                return_outputs=return_outputs,
+                num_items_in_batch=num_items_in_batch,
+            )
+
+        labels = inputs.get("labels")
+        if labels is None:
+            raise ValueError("Weighted I2E loss requires labels.")
+        model_inputs = {key: value for key, value in inputs.items() if key != "labels"}
+        outputs = model(**model_inputs)
+        shift_logits = outputs.logits[..., :-1, :].contiguous().float()
+        shift_labels = labels[..., 1:].contiguous()
+        token_losses = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).view_as(shift_labels)
+        valid = shift_labels.ne(-100)
+        weights = self._i2e_token_weights(shift_labels).to(token_losses.device)
+        weighted_valid = weights * valid.to(weights.dtype)
+        loss = (token_losses * weighted_valid).sum() / weighted_valid.sum().clamp_min(1.0)
+        return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):
         """

@@ -384,7 +384,7 @@ def train():
     old_processor_len = len(processor.tokenizer)
         
     # add special tokens
-    add_tokens = [SAM_PAD_TOKEN, DINO_PAD_TOKEN, DEPTH_PAD_TOKEN, SD_PAD_TOKEN, INTERN_PAD_TOKEN, PIDINET_PAD_TOKEN, SIGLIP_PAD_TOKEN, METACLIP_PAD_TOKEN, "<think>", "</think>", "<answer>", "</answer>"]
+    add_tokens = [SAM_PAD_TOKEN, DINO_PAD_TOKEN, DEPTH_PAD_TOKEN, SD_PAD_TOKEN, INTERN_PAD_TOKEN, PIDINET_PAD_TOKEN, SIGLIP_PAD_TOKEN, METACLIP_PAD_TOKEN, "<think>", "</think>", "<explicit>", "</explicit>", "<answer>", "</answer>"]
     processor.tokenizer.add_special_tokens({"additional_special_tokens": [ANCHOR_START_TOKEN, ANCHOR_END_TOKEN]})
     processor.tokenizer.add_tokens(add_tokens)
     sam_token_idx = processor.tokenizer(SAM_PAD_TOKEN, add_special_tokens=False).input_ids[0]
@@ -414,6 +414,12 @@ def train():
     else:
         old_len = p.data.shape[0]
     new_len = len(processor.tokenizer)
+    if new_len > old_len:
+        model.resize_token_embeddings(new_len)
+        qwen_embed = model.get_input_embeddings()
+        lm_head = model.get_output_embeddings()
+        p = qwen_embed.weight
+        old_len = p.data.shape[0]
     
     model.get_anchor_token_idx(sam_token_idx, dino_token_idx, depth_token_idx, sd_token_idx, intern_token_idx, pidinet_token_idx, siglip_token_idx, metaclip_token_idx)
     if training_args.lora_enable and training_args.lora_weight_path:
