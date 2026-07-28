@@ -25,10 +25,18 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def row_id(row: dict[str, Any], index: int) -> str:
-    for key in ("id", "question_id", "sample_id", "uid"):
+    for key in ("sample_id", "uid"):
         value = row.get(key)
         if value not in (None, ""):
             return str(value)
+    composite = (
+        row.get("dataset") or row.get("source") or "",
+        row.get("image_id") or row.get("image") or "",
+        row.get("question_id") or row.get("id") or "",
+        row.get("question") or row.get("query") or "",
+    )
+    if any(value not in (None, "") for value in composite):
+        return "::".join(str(value) for value in composite)
     return f"row-{index:06d}"
 
 
