@@ -6,7 +6,12 @@ from transformers import AutoProcessor, BitsAndBytesConfig, HfArgumentParser
 from training.trainer import QwenTrainer, UnfreezeLoRACallback, ResumeDatasetCallback
 from training.data import make_supervised_data_module
 from training.params import DataArguments, ModelArguments, TrainingArguments
-from training.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
+from training.train_utils import (
+    get_peft_state_maybe_zero_3,
+    get_peft_state_non_lora_maybe_zero_3,
+    keep_compact_non_lora_parameter,
+    safe_save_model_for_hf_trainer,
+)
 import pathlib
 from training.monkey_patch_forward import (
     replace_qwen2_5_with_mixed_modality_forward,
@@ -516,16 +521,16 @@ def train():
             model.named_parameters(), require_grad_only=False
         )
         if training_args.compact_non_lora_checkpoint:
-            anchor_markers = ("_projection", "cross_attention", "_query_vectors")
             non_lora_state_dict = {
                 key: value
                 for key, value in non_lora_state_dict.items()
-                if any(marker in key for marker in anchor_markers)
+                if keep_compact_non_lora_parameter(key)
             }
         if local_rank == 0 or local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))
+            processor.save_pretrained(training_args.output_dir)
     else:
         safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
 

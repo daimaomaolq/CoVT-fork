@@ -9,7 +9,7 @@ DVG_GEN_ROOT="${DVG_GEN_ROOT:-$DVG_ROOT/generative_qwen_i2e}"
 RUN_ROOT="${RUN_ROOT:-/root/autodl-tmp/outputs/covt_uav_refpg_v8_cleanenv_20260527}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/hf_cache/hub/models--Wakals--CoVT-7B-seg_depth_dino/snapshots/154b974eb0d071160a4bc5b287f242bc2875b886}"
 QTSA_ROOT="${QTSA_ROOT:-$RUN_ROOT/checkpoints/dvgbench_generative_covt_segdino_querytail_warmstart_lora_v1}"
-RUN_TAG="${RUN_TAG:-v3_full_three_task_guarded}"
+RUN_TAG="${RUN_TAG:-v4_schema_state_preserved}"
 OUT_DIR="${OUT_DIR:-$RUN_ROOT/checkpoints/dvgbench_qtsa_i2e_sft_$RUN_TAG}"
 PRED_DIR="${PRED_DIR:-$RUN_ROOT/predictions}"
 LOG_ROOT="${LOG_ROOT:-$RUN_ROOT/logs}"
@@ -166,7 +166,7 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$ENV_PY" train/src/tools/eval_dvgbench_generativ
   --anchor-model-id "['sam','dino']" \
   --anchor-prompt-mode query_tail \
   --anchor-token-counts "[8,4,4,4,4,4,4,4]" \
-  --max-new-tokens 128 \
+  --max-new-tokens 192 \
   --temperature 0 \
   --batch-size 1 \
   2>&1 | tee "$EVAL_LOG"

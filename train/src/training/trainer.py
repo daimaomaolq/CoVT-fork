@@ -23,7 +23,11 @@ import numpy as np
 from transformers.processing_utils import ProcessorMixin
 from transformers.modeling_utils import PreTrainedModel
 from peft import PeftModel
-from training.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3
+from training.train_utils import (
+    get_peft_state_maybe_zero_3,
+    get_peft_state_non_lora_maybe_zero_3,
+    keep_compact_non_lora_parameter,
+)
 
 try:
     from deepspeed import zero
@@ -94,6 +98,8 @@ class QwenTrainer(Trainer):
         ]
         answer_start = tag_patterns[4]
         answer_end = tag_patterns[5]
+        bbox_start = self._token_sequence("{<")
+        bbox_end = self._token_sequence(">}")
         for row_index in range(labels.shape[0]):
             tokens = labels[row_index].tolist()
             starts = self._sequence_starts(tokens, answer_start)
@@ -106,6 +112,17 @@ class QwenTrainer(Trainer):
                 ]
                 end = ends[0] + len(answer_end) if ends else len(tokens)
                 weights[row_index, start:end] = answer_weight
+            else:
+                bbox_starts = self._sequence_starts(tokens, bbox_start)
+                if bbox_starts:
+                    start = bbox_starts[0]
+                    bbox_ends = [
+                        index
+                        for index in self._sequence_starts(tokens, bbox_end)
+                        if index >= start
+                    ]
+                    end = bbox_ends[0] + len(bbox_end) if bbox_ends else len(tokens)
+                    weights[row_index, start:end] = answer_weight
             if format_weight != 1.0:
                 for pattern in tag_patterns:
                     for start in self._sequence_starts(tokens, pattern):
@@ -308,11 +325,10 @@ class QwenTrainer(Trainer):
                 require_grad_only=False,
             )
             if self.args.compact_non_lora_checkpoint:
-                anchor_markers = ("_projection", "cross_attention", "_query_vectors")
                 non_lora_weights = {
                     key: value
                     for key, value in non_lora_weights.items()
-                    if any(marker in key for marker in anchor_markers)
+                    if keep_compact_non_lora_parameter(key)
                 }
             torch.save(non_lora_weights, os.path.join(output_dir, "non_lora_state_dict.bin"))
 

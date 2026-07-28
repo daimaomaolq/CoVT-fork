@@ -44,8 +44,8 @@ def test_i2e_prompt_target_and_parser() -> None:
     assert "<explicit>" in prompt
     assert "<answer>" in prompt
     assert target == (
-        '<think>I resolve the implicit scene clue "the car violating the traffic '
-        'rule" and verify the target using visible evidence.</think>\n'
+        "<think>The implicit clue resolves to the white car on the left; I verify "
+        "these visible attributes and relations before localizing it.</think>\n"
         "<explicit>the white car on the left</explicit>\n"
         "<answer>{<100><200><300><400>}</answer>"
     )

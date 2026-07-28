@@ -59,6 +59,15 @@ def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
     to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
     return to_return
 
+def keep_compact_non_lora_parameter(name):
+    """Return whether a non-LoRA tensor is required for a compact checkpoint."""
+
+    anchor_markers = ("_projection", "cross_attention", "_query_vectors")
+    schema_markers = ("embed_tokens", "lm_head")
+    return any(marker in name for marker in anchor_markers + schema_markers)
+
+
+
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                                    output_dir: str):
     """Collects the state dict and dump to disk."""
