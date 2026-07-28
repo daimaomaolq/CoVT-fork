@@ -41,7 +41,16 @@ def row_id(row: dict[str, Any], index: int) -> str:
 
 
 def row_class(row: dict[str, Any]) -> str:
-    return str(row.get("class") or row.get("category") or "unknown").strip().lower()
+    value = str(row.get("class") or row.get("category") or "unknown")
+    value = value.strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "social_activity": "social",
+        "social_activities": "social",
+        "productive_activity": "productive",
+        "productive_activities": "productive",
+        "sports": "sport",
+    }
+    return aliases.get(value, value)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
