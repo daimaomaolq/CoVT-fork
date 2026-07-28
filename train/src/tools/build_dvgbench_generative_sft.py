@@ -232,7 +232,11 @@ def answer_for_bbox(
             .replace("</answer>", "")
             .strip()
         )
-        rationale = explicit_reference
+        reasoning_query = clean_text(query).replace("<", "").replace(">", "")
+        rationale = (
+            f'I resolve the implicit scene clue "{reasoning_query}" and verify '
+            "the target using visible evidence."
+        )
 
         return (
             f"<think>{rationale}</think>\n"

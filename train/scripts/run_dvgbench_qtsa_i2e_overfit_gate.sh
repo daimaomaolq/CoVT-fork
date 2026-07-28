@@ -7,7 +7,7 @@ DVG_ROOT="${DVG_ROOT:-/root/autodl-tmp/datasets/DVGBench}"
 RUN_ROOT="${RUN_ROOT:-/root/autodl-tmp/outputs/covt_uav_refpg_v8_cleanenv_20260527}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/hf_cache/hub/models--Wakals--CoVT-7B-seg_depth_dino/snapshots/154b974eb0d071160a4bc5b287f242bc2875b886}"
 QTSA_CKPT="${QTSA_CKPT:-$RUN_ROOT/checkpoints/dvgbench_generative_covt_segdino_querytail_warmstart_lora_v1}"
-TAG="${TAG:-v3_gate32_weighted}"
+TAG="${TAG:-v3b_gate32_format}"
 OUT_DIR="$RUN_ROOT/checkpoints/dvgbench_qtsa_i2e_$TAG"
 WORK_DIR="$DVG_ROOT/generative_qwen_i2e/$TAG"
 PRED_DIR="$RUN_ROOT/predictions"
@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -m training.train \
   --train_anchor_adapters False \
   --compact_non_lora_checkpoint True \
   --i2e_answer_token_weight 5.0 \
-  --i2e_format_token_weight 2.0 \
+  --i2e_format_token_weight 8.0 \
   --num_train_epochs 12 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 4 \
