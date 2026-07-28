@@ -91,6 +91,15 @@ class TrainingArguments(TrainingArguments):
             )
         },
     )
+    compact_non_lora_checkpoint: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Save only QTSA anchor non-LoRA tensors. Use for LoRA continuation "
+                "when frozen base weights come from model_path."
+            )
+        },
+    )
     i2e_answer_token_weight: float = field(
         default=1.0,
         metadata={"help": "Loss multiplier for <answer>...</answer> tokens."},

@@ -56,6 +56,7 @@ CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -m training.train \
   --anchor_prompt_mode query_tail \
   --anchor_response_mode none \
   --train_anchor_adapters False \
+  --compact_non_lora_checkpoint True \
   --i2e_answer_token_weight 5.0 \
   --i2e_format_token_weight 2.0 \
   --num_train_epochs 12 \
@@ -65,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0 "$ENV_PY" -m training.train \
   --weight_decay 0.0 \
   --warmup_ratio 0.05 \
   --lr_scheduler_type cosine \
-  --save_strategy epoch \
+  --save_strategy no \
   --save_total_limit 1 \
   --logging_steps 5 \
   --bf16 True \

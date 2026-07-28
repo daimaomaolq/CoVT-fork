@@ -303,7 +303,17 @@ class QwenTrainer(Trainer):
 
             self.save_model(output_dir, _internal_call=True)
 
-            non_lora_weights = get_peft_state_non_lora_maybe_zero_3(self.model.named_parameters(), require_grad_only=False)
+            non_lora_weights = get_peft_state_non_lora_maybe_zero_3(
+                self.model.named_parameters(),
+                require_grad_only=False,
+            )
+            if self.args.compact_non_lora_checkpoint:
+                anchor_markers = ("_projection", "cross_attention", "_query_vectors")
+                non_lora_weights = {
+                    key: value
+                    for key, value in non_lora_weights.items()
+                    if any(marker in key for marker in anchor_markers)
+                }
             torch.save(non_lora_weights, os.path.join(output_dir, "non_lora_state_dict.bin"))
 
             if not self.args.save_only_model:

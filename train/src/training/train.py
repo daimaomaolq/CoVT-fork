@@ -515,7 +515,13 @@ def train():
         non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
             model.named_parameters(), require_grad_only=False
         )
-
+        if training_args.compact_non_lora_checkpoint:
+            anchor_markers = ("_projection", "cross_attention", "_query_vectors")
+            non_lora_state_dict = {
+                key: value
+                for key, value in non_lora_state_dict.items()
+                if any(marker in key for marker in anchor_markers)
+            }
         if local_rank == 0 or local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
