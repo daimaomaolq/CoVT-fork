@@ -398,7 +398,7 @@ class AnchorModels():
         SAM_MODEL_TYPE = "vit_h"
         
         DINO_MODEL_TYPE = "dinov2_vitl14"
-        DINO_MODEL_PATH = "facebookresearch/dinov2"
+        DINO_MODEL_PATH = str(Path(torch.hub.get_dir()) / "facebookresearch_dinov2_main")
         DINO_PROCESSOR_CONFIG = {"pretrained_model_name_or_path": "facebook/dinov2-large", "crop_size": {"height": 448, "width": 448}}
 
         DEPTH_MODEL_CONFIG = {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]}
@@ -420,7 +420,7 @@ class AnchorModels():
             self.sam_predictor = SamPredictor(self.sam)
             self.mask_generator = SamAutomaticMaskGenerator(self.sam)
         if "dino" in self.anchor_model_id:
-            self.dinovit = torch.hub.load(DINO_MODEL_PATH, DINO_MODEL_TYPE)
+            self.dinovit = torch.hub.load(DINO_MODEL_PATH, DINO_MODEL_TYPE, source="local")
             self.dinovit = self.dinovit.eval()
             self.extracted_outputs = {}
             def norm_hook(module, module_input, module_output):
