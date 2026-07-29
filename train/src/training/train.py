@@ -336,7 +336,18 @@ def train():
             if not warmstart_path.exists():
                 raise FileNotFoundError(f"LoRA warm-start path does not exist: {warmstart_path}")
             rank0_print({"status": "warmstart_lora_adapter", "path": str(warmstart_path)})
-            model = PeftModel.from_pretrained(model, str(warmstart_path), is_trainable=True)
+            model = PeftModel.from_pretrained(
+                model,
+                str(warmstart_path),
+                is_trainable=not training_args.freeze_warmstart_lora,
+            )
+            rank0_print(
+                {
+                    "status": "warmstart_lora_loaded",
+                    "path": str(warmstart_path),
+                    "is_trainable": not training_args.freeze_warmstart_lora,
+                }
+            )
         else:
             peft_config = LoraConfig(
                 r=training_args.lora_rank,
@@ -478,7 +489,7 @@ def train():
         )
 
         non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-            model.named_parameters(), require_grad_only=False
+            model.named_parameters(), require_grad_only=True
         )
 
         if local_rank == 0 or local_rank == -1:

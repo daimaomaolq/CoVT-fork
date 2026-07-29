@@ -32,6 +32,7 @@ from training.constants import (
     SAM_PAD_TOKEN,
     SD_PAD_TOKEN,
     SIGLIP_PAD_TOKEN,
+    SYSTEM_MESSAGE,
     VISION_END_TOKEN,
 )
 
@@ -51,9 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="Kept for CLI symmetry; generation is sequential.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--image-min-pixels", type=int, default=200704)
+    parser.add_argument("--image-max-pixels", type=int, default=802816)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
-    parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning"))
+    parser.add_argument("--prompt-mode", default="answer_only", choices=("answer_only", "reasoning", "official_i2e"))
     parser.add_argument(
         "--anchor-model-id",
         default="[]",
@@ -106,6 +109,14 @@ def resolve_device(device_arg: str, torch_module):
 
 
 def prompt_for_query(query: str, mode: str) -> str:
+    if mode == "official_i2e":
+        return (
+            f"Find <ref>{query}</ref> in the image. Output the thinking process "
+            "in <think> </think>, a brief description of the referred object "
+            "(use words such as color, size, and relative position) in "
+            "<explicit> </explicit>, and the final answer [x1,y1,x2,y2] in "
+            "<answer> </answer> tags."
+        )
     if mode == "reasoning":
         return (
             f"Locate the region described by: {query}\n"
@@ -305,6 +316,14 @@ def load_model(args: argparse.Namespace):
     for processor_path in processor_candidates:
         try:
             processor = AutoProcessor.from_pretrained(processor_path)
+            image_processor = getattr(processor, "image_processor", None)
+            if image_processor is not None:
+                image_processor.min_pixels = args.image_min_pixels
+                image_processor.max_pixels = args.image_max_pixels
+                image_processor.size = {
+                    "shortest_edge": args.image_min_pixels,
+                    "longest_edge": args.image_max_pixels,
+                }
             break
         except Exception as err:
             last_processor_error = err
@@ -352,7 +371,10 @@ def generate_one(model, processor, device, image_path: str, query: str, args: ar
     import torch
 
     image = Image.open(image_path).convert("RGB")
-    messages = [
+    messages = []
+    if args.prompt_mode == "official_i2e":
+        messages.append({"role": "system", "content": SYSTEM_MESSAGE})
+    messages += [
         {
             "role": "user",
             "content": [

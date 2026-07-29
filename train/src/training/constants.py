@@ -20,4 +20,11 @@ PIDINET_PAD_TOKEN = "<|pidinet_pad|>"
 SIGLIP_PAD_TOKEN = "<|siglip_pad|>"
 METACLIP_PAD_TOKEN = "<|metaclip_pad|>"
 
-SYSTEM_MESSAGE = "You are a helpful assistant."
+SYSTEM_MESSAGE = (
+    "A conversation between User and Assistant. The user asks a question, and "
+    "the Assistant solves it. The assistant first thinks about the reasoning "
+    "process in the mind and then provides the user with the answer. The "
+    "reasoning process and answer are enclosed within <think> </think> and "
+    "<answer> </answer> tags, respectively, i.e., <think> reasoning process "
+    "here </think><answer> answer here </answer>\n"
+)
