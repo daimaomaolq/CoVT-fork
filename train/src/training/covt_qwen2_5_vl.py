@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -393,7 +394,7 @@ class AnchorLoss():
 class AnchorModels():
     def __init__(self, anchor_model_id):
         self.anchor_model_id = anchor_model_id        
-        SAM_CHECKPOINT = "src/anchors/segment_anything/ckpt/sam_vit_h_4b8939.pth"
+        SAM_CHECKPOINT = str(Path(__file__).resolve().parents[1] / "anchors/segment_anything/ckpt/sam_vit_h_4b8939.pth")
         SAM_MODEL_TYPE = "vit_h"
         
         DINO_MODEL_TYPE = "dinov2_vitl14"
