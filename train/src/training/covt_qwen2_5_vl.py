@@ -1078,6 +1078,10 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         self.anchor_gate_temperature = float(temperature)
         self.anchor_gate_regularization_weight = float(regularization_weight)
         if reset_parameters:
+            # from_pretrained initializes newly introduced parameters after
+            # __init__; explicitly restore the intended prompt distribution.
+            nn.init.normal_(self.sam_prompt_embeddings, mean=0.0, std=0.02)
+            nn.init.normal_(self.dino_prompt_embeddings, mean=0.0, std=0.02)
             self._reset_anchor_gate_routers(init_bias)
 
     def _apply_anchor_input_gates(self, input_ids, inputs_embeds, attention_mask):
