@@ -11,6 +11,10 @@ class ModelArguments:
     anchor_model_id: str = field(default=None, metadata={"help": "List of anchor model ids"})
     anchor_loss_weight: str = field(default='[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]', metadata={"help": "List of anchor loss weights: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip"})
     anchor_tokens: str = field(default='[64, 64, 64, 64, 64, 64, 64, 64]', metadata={"help": "List of anchor tokens"})
+    anchor_gate_mode: str = field(default="none", metadata={"help": "Anchor input gate: none or query_conditioned."})
+    anchor_gate_init_bias: float = field(default=-4.0, metadata={"help": "Initial logit bias for query-conditioned anchor gates."})
+    anchor_gate_temperature: float = field(default=1.0, metadata={"help": "Positive sigmoid temperature for anchor gates."})
+    anchor_gate_regularization: float = field(default=0.0, metadata={"help": "Penalty weight on mean anchor gate activation."})
 
     # LLava specific parameters
     vision_tower: str = field(default=None, metadata={"help": "Vision tower"})

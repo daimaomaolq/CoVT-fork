@@ -300,7 +300,21 @@ def train():
         raise ValueError("anchor_loss_weight must have 8 values: sam,dino,depth,SD,internvit,pidinet,siglip,metaclip")
     model.anchor_loss_weight = anchor_loss_weight
     model.get_anchor_model_ids(anchor_model_id)
-    print({"anchor_model_id": anchor_model_id, "anchor_loss_weight": anchor_loss_weight})
+    model.configure_anchor_gate(
+        mode=model_args.anchor_gate_mode,
+        init_bias=model_args.anchor_gate_init_bias,
+        temperature=model_args.anchor_gate_temperature,
+        regularization_weight=model_args.anchor_gate_regularization,
+        reset_parameters=True,
+    )
+    print({
+        "anchor_model_id": anchor_model_id,
+        "anchor_loss_weight": anchor_loss_weight,
+        "anchor_gate_mode": model_args.anchor_gate_mode,
+        "anchor_gate_init_bias": model_args.anchor_gate_init_bias,
+        "anchor_gate_temperature": model_args.anchor_gate_temperature,
+        "anchor_gate_regularization": model_args.anchor_gate_regularization,
+    })
     model.align_vqa_only_stage = training_args.vqa_only_stage
 
     model.config.use_cache = False
@@ -366,7 +380,10 @@ def train():
         for name, param in model.named_parameters():
             normalized_name = name.lower()
             is_selected_anchor = any(prefix in normalized_name for prefix in selected_anchor_prefixes)
-            is_anchor_fusion = any(marker in normalized_name for marker in ("_projection", "cross_attention", "_query_vectors"))
+            is_anchor_fusion = any(
+                marker in normalized_name
+                for marker in ("_projection", "cross_attention", "_query_vectors", "_prompt_embeddings", "_gate_")
+            )
             if is_selected_anchor and is_anchor_fusion:
                 param.requires_grad = True
         # model.print_trainable_parameters()

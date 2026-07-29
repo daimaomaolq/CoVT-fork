@@ -69,6 +69,10 @@ def parse_args() -> argparse.Namespace:
         help="Where to insert anchor tokens during generation.",
     )
     parser.add_argument(
+        "--anchor-gate-mode", default="none", choices=("none", "query_conditioned")
+    )
+    parser.add_argument("--anchor-gate-temperature", type=float, default=1.0)
+    parser.add_argument(
         "--anchor-token-counts",
         "--anchor_token_counts",
         dest="anchor_token_counts",
@@ -334,6 +338,13 @@ def load_model(args: argparse.Namespace):
         validate_anchor_tokens(processor, anchor_model_ids)
         if hasattr(model, "get_anchor_token_idx"):
             model.get_anchor_token_idx(*anchor_token_indices(processor))
+    if hasattr(model, "configure_anchor_gate"):
+        model.configure_anchor_gate(
+            mode=args.anchor_gate_mode,
+            temperature=args.anchor_gate_temperature,
+            regularization_weight=0.0,
+            reset_parameters=False,
+        )
     embedding_rows = model.get_input_embeddings().weight.shape[0]
     if len(processor.tokenizer) > embedding_rows:
         model.resize_token_embeddings(len(processor.tokenizer))
@@ -377,7 +388,13 @@ def load_model(args: argparse.Namespace):
     return model, processor, device
 
 
-def generate_one(model, processor, device, image_path: str, query: str, args: argparse.Namespace) -> str:
+def read_anchor_gate_trace(model) -> dict[str, list[float]]:
+    current = model.get_base_model() if hasattr(model, "get_base_model") else model
+    trace = getattr(current, "last_anchor_gate_values", {})
+    return {str(key): [float(value) for value in values] for key, values in trace.items()}
+
+
+def generate_one(model, processor, device, image_path: str, query: str, args: argparse.Namespace) -> tuple[str, dict[str, list[float]]]:
     from PIL import Image
     import torch
 
@@ -412,7 +429,8 @@ def generate_one(model, processor, device, image_path: str, query: str, args: ar
             eos_token_id=processor.tokenizer.eos_token_id,
         )
     input_len = inputs["input_ids"].shape[1]
-    return processor.decode(generated_ids[0, input_len:], skip_special_tokens=False).strip()
+    raw_output = processor.decode(generated_ids[0, input_len:], skip_special_tokens=False).strip()
+    return raw_output, read_anchor_gate_trace(model)
 
 
 def main() -> None:
@@ -428,12 +446,15 @@ def main() -> None:
     parse_failed = 0
     per_class_total: dict[str, int] = defaultdict(int)
     per_class_acc: dict[str, int] = defaultdict(int)
+    gate_values: dict[str, list[float]] = defaultdict(list)
 
     with output_path.open("w", encoding="utf-8") as handle:
         for row in rows:
             sample_id = str(row["sample_id"])
             query = str(row.get(args.query_field) or row.get("query") or "")
-            raw_output = generate_one(model, processor, device, str(row["image"]), query, args)
+            raw_output, anchor_gate_values = generate_one(model, processor, device, str(row["image"]), query, args)
+            for gate_name, values in anchor_gate_values.items():
+                gate_values[gate_name].extend(values)
             pred_bbox = parse_bbox_text(raw_output)
             processed_size = None
             if pred_bbox is not None:
@@ -485,6 +506,10 @@ def main() -> None:
                         "protocol": {
                             "question_e_used": False,
                             "gt_visible_during_inference": False,
+                            "sam_used": "sam" in parse_anchor_model_ids(args.anchor_model_id),
+                            "dino_used": "dino" in parse_anchor_model_ids(args.anchor_model_id),
+                            "anchor_gate_mode": args.anchor_gate_mode,
+                            "anchor_gate_values": anchor_gate_values,
                             "coordinate_system": "processed_image_pixels",
                             "image_min_pixels": args.image_min_pixels,
                             "image_max_pixels": args.image_max_pixels,
@@ -508,8 +533,17 @@ def main() -> None:
         "class_Acc@0.5": class_acc,
         "class_counts": dict(sorted(per_class_total.items())),
         "parse_failed": parse_failed,
+        "anchor_gate_mode": args.anchor_gate_mode,
+        "anchor_gate_mean": {key: sum(values) / max(len(values), 1) for key, values in sorted(gate_values.items())},
+        "anchor_gate_activation_rate@0.5": {
+            key: sum(value >= 0.5 for value in values) / max(len(values), 1)
+            for key, values in sorted(gate_values.items())
+        },
         "predictions": str(output_path),
     }
+    output_path.with_suffix(".summary.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

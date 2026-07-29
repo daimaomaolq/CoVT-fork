@@ -924,6 +924,24 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         self.pidinet_cross_attention = None
         self.siglip_cross_attention = None
         self.metaclip_cross_attention = None
+
+        # Small query-conditioned gates start almost closed so the frozen
+        # DroneVG policy remains the dominant path until evidence opens them.
+        gate_hidden = min(128, config.hidden_size)
+        self.anchor_gate_mode = "none"
+        self.anchor_gate_temperature = 1.0
+        self.anchor_gate_regularization_weight = 0.0
+        self.last_anchor_gate_values = {}
+        self.sam_prompt_embeddings = nn.Parameter(torch.empty(4, config.hidden_size, dtype=torch.bfloat16))
+        self.dino_prompt_embeddings = nn.Parameter(torch.empty(4, config.hidden_size, dtype=torch.bfloat16))
+        self.sam_gate_norm = nn.LayerNorm(config.hidden_size)
+        self.dino_gate_norm = nn.LayerNorm(config.hidden_size)
+        self.sam_gate_router = nn.Sequential(
+            nn.Linear(config.hidden_size, gate_hidden), nn.SiLU(), nn.Linear(gate_hidden, 1)
+        )
+        self.dino_gate_router = nn.Sequential(
+            nn.Linear(config.hidden_size, gate_hidden), nn.SiLU(), nn.Linear(gate_hidden, 1)
+        )
         
         self.depth_token_generator = None
         
@@ -999,6 +1017,9 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         self.metaclip_projection = nn.Linear(3584, 1024)
         self.metaclip_query_vectors = nn.Parameter(torch.randn(1, 1024, dtype=torch.bfloat16, requires_grad=True))
         self.metaclip_cross_attention = nn.MultiheadAttention(embed_dim=1024, num_heads=8, batch_first=True)
+        nn.init.normal_(self.sam_prompt_embeddings, mean=0.0, std=0.02)
+        nn.init.normal_(self.dino_prompt_embeddings, mean=0.0, std=0.02)
+        self._reset_anchor_gate_routers(-4.0)
         
         # self.SD_token_projection = nn.Linear(3584, 64*64)
         
@@ -1040,7 +1061,66 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
             self.metaclip_projection = None
             self.metaclip_query_vectors = None
             self.metaclip_cross_attention = None
-        
+
+
+    def _reset_anchor_gate_routers(self, init_bias):
+        for router in (self.sam_gate_router, self.dino_gate_router):
+            nn.init.zeros_(router[-1].weight)
+            nn.init.constant_(router[-1].bias, float(init_bias))
+
+    def configure_anchor_gate(self, mode="none", init_bias=-4.0, temperature=1.0,
+                              regularization_weight=0.0, reset_parameters=False):
+        if mode not in {"none", "query_conditioned"}:
+            raise ValueError(f"Unsupported anchor gate mode: {mode}")
+        if float(temperature) <= 0:
+            raise ValueError("anchor_gate_temperature must be positive")
+        self.anchor_gate_mode = mode
+        self.anchor_gate_temperature = float(temperature)
+        self.anchor_gate_regularization_weight = float(regularization_weight)
+        if reset_parameters:
+            self._reset_anchor_gate_routers(init_bias)
+
+    def _apply_anchor_input_gates(self, input_ids, inputs_embeds, attention_mask):
+        if self.anchor_gate_mode != "query_conditioned" or input_ids is None:
+            return inputs_embeds, None
+        families = (
+            ("sam", self.sam_token_idx, self.sam_prompt_embeddings, self.sam_gate_norm, self.sam_gate_router),
+            ("dino", self.dino_token_idx, self.dino_prompt_embeddings, self.dino_gate_norm, self.dino_gate_router),
+        )
+        family_masks = [input_ids.eq(item[1]) for item in families if item[1] is not None]
+        if not family_masks or not any(mask.any().item() for mask in family_masks):
+            return inputs_embeds, None
+        pooled_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        if attention_mask is not None and attention_mask.ndim == 2:
+            pooled_mask &= attention_mask.bool()
+        for family_mask in family_masks:
+            pooled_mask &= ~family_mask
+        denom = pooled_mask.sum(dim=1, keepdim=True).clamp_min(1).to(inputs_embeds.dtype)
+        pooled = (inputs_embeds * pooled_mask.unsqueeze(-1)).sum(dim=1) / denom
+        gated_embeds = inputs_embeds.clone()
+        gate_values, trace = [], {}
+        for name, token_idx, prompt_embeddings, norm, router in families:
+            if token_idx is None:
+                continue
+            mask = input_ids.eq(token_idx)
+            if not mask.any():
+                continue
+            counts = mask.sum(dim=1)
+            if int(counts.max().item()) > prompt_embeddings.shape[0]:
+                raise ValueError(f"{name} gated prompt supports at most 4 tokens")
+            gate = torch.sigmoid(router(norm(pooled)) / self.anchor_gate_temperature)
+            gate_values.append(gate)
+            trace[name] = [float(value) for value in gate.detach().float().cpu().flatten()]
+            for batch_idx in range(input_ids.shape[0]):
+                count = int(counts[batch_idx].item())
+                if count:
+                    replacement = prompt_embeddings[:count].to(gated_embeds.dtype) * gate[batch_idx].to(gated_embeds.dtype)
+                    gated_embeds[batch_idx, mask[batch_idx]] = replacement
+        self.last_anchor_gate_values = trace
+        regularization = None
+        if gate_values and self.anchor_gate_regularization_weight > 0:
+            regularization = torch.cat(gate_values, dim=1).mean() * self.anchor_gate_regularization_weight
+        return gated_embeds, regularization
         
     def get_anchor_token_idx(self, sam_token_idx, dino_token_idx, depth_token_idx, SD_token_idx, internvit_token_idx, pidinet_token_idx, siglip_token_idx, metaclip_token_idx):
         self.sam_token_idx = sam_token_idx
@@ -1118,7 +1198,7 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
             sam_projected = self.sam_projection(self.apply_rope_custome(sam_hidden))
             outputs["sam"]["projected"] = maybe_detach(sam_projected)
             if cross_attention and self.sam_cross_attention is not None and self.sam_query_vectors is not None:
-                sam_query = self.sam_query_vectors.unsqueeze(0)
+                sam_query = self.sam_query_vectors[:sam_projected.shape[1]].unsqueeze(0)
                 sam_query = sam_query.expand(len(sam_valid_indices), -1, -1).to(sam_projected.dtype)
                 sam_proj_norm = nn.functional.normalize(sam_projected)
                 sam_attn_output, _ = self.sam_cross_attention(
@@ -1395,6 +1475,7 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
         """
                  
         self.global_steps += 1
+        gate_regularization = None
         
         if self.anchor_models is not None:
             self.anchor_models.set_device(self.device)
@@ -1443,6 +1524,9 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
 
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
+            inputs_embeds, gate_regularization = self._apply_anchor_input_gates(
+                input_ids, inputs_embeds, attention_mask
+            )
 
         # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
         if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
@@ -1578,7 +1662,7 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
                 
                 # Project hidden features to 256 (prompt_encoder.embed_dim)
                 sam_token_embeddings = self.sam_projection(sam_hidden_features)  # [B, k, 256]
-                sam_query = self.sam_query_vectors.unsqueeze(0)
+                sam_query = self.sam_query_vectors[:sam_token_embeddings.shape[1]].unsqueeze(0)
                 sam_query = sam_query.expand(len(sam_valid_indices), -1, -1).to(sam_encoded_value.dtype)
                 sam_proj = nn.functional.normalize(sam_token_embeddings)
                 sam_attn_output, _ = self.sam_cross_attention(
@@ -1953,6 +2037,9 @@ class CoVTForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
                     loss = loss_fct(shift_logits, shift_labels) + seg_loss + dino_loss + depth_loss + SD_loss + internvit_loss + pidinet_loss + siglip_loss + metaclip_loss
                 else:
                     loss = loss_fct(shift_logits, shift_labels)
+
+        if loss is not None and gate_regularization is not None:
+            loss = loss + gate_regularization
             
         if not return_dict:
             output = (logits,) + outputs[1:]
