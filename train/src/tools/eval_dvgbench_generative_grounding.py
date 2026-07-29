@@ -343,12 +343,27 @@ def load_model(args: argparse.Namespace):
         non_lora_path = Path(args.adapter_path) / "non_lora_state_dict.bin"
         if non_lora_path.is_file():
             non_lora_state = torch.load(non_lora_path, map_location="cpu")
-            missing, unexpected = model.load_state_dict(non_lora_state, strict=False)
+            model_state = model.state_dict()
+            normalized_non_lora = {}
+            skipped_non_lora = []
+            for key, value in non_lora_state.items():
+                normalized_key = key
+                for prefix in ("base_model.model.", "model."):
+                    if normalized_key.startswith(prefix):
+                        normalized_key = normalized_key[len(prefix):]
+                        break
+                if normalized_key in model_state and model_state[normalized_key].shape == value.shape:
+                    normalized_non_lora[normalized_key] = value
+                else:
+                    skipped_non_lora.append(key)
+            missing, unexpected = model.load_state_dict(normalized_non_lora, strict=False)
             print(
                 json.dumps(
                     {
                         "status": "loaded_non_lora_state",
                         "path": str(non_lora_path),
+                        "loaded": len(normalized_non_lora),
+                        "skipped": len(skipped_non_lora),
                         "missing": len(missing),
                         "unexpected": len(unexpected),
                     },
