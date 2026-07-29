@@ -67,6 +67,10 @@ class TrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Freeze a warm-start LoRA while training CoVT anchor modules."},
     )
+    freeze_token_embeddings: bool = field(
+        default=False,
+        metadata={"help": "Keep the full token embedding and LM head frozen during anchor-only training."},
+    )
     lora_bias: str = "none"
     vision_lr: Optional[float] = None
     merger_lr: Optional[float] = None

@@ -359,12 +359,15 @@ def train():
             rank0_print("Adding LoRA to the model...")
             model = get_peft_model(model, peft_config)
         
+        if training_args.freeze_warmstart_lora:
+            for param in model.parameters():
+                param.requires_grad = False
+        selected_anchor_prefixes = tuple(f"{anchor_id.lower()}_" for anchor_id in anchor_model_id)
         for name, param in model.named_parameters():
-            if '_projection' in name:
-                param.requires_grad = True
-            if 'cross_attention' in name:
-                param.requires_grad = True
-            if '_query_vectors' in name:
+            normalized_name = name.lower()
+            is_selected_anchor = any(prefix in normalized_name for prefix in selected_anchor_prefixes)
+            is_anchor_fusion = any(marker in normalized_name for marker in ("_projection", "cross_attention", "_query_vectors"))
+            if is_selected_anchor and is_anchor_fusion:
                 param.requires_grad = True
         # model.print_trainable_parameters()
     processor = AutoProcessor.from_pretrained(model_args.model_id,
@@ -423,26 +426,34 @@ def train():
                 "embed_tokens" in n
             ]
         ):
-            p.requires_grad = True
+            p.requires_grad = not training_args.freeze_token_embeddings
             
         if any(
             [
                 "lm_head" in n
             ]
         ):
-            p.requires_grad = True
+            p.requires_grad = not training_args.freeze_token_embeddings
     
-    _mask = torch.ones(old_len, device=model.device, dtype=torch.bool)
-    _mask[:] = False
-    _mask[old_processor_len:new_len] = True
+    if not training_args.freeze_token_embeddings:
+        _mask = torch.zeros(new_len, device=model.device, dtype=torch.bool)
+        _mask[old_processor_len:new_len] = True
 
-    def row_mask_hook(grad):
-        if grad is None:
-            return grad
-        return grad * _mask.to(grad.device).view(-1, 1)
-    
-    model.get_input_embeddings().weight.register_hook(row_mask_hook)
-    model.get_output_embeddings().weight.register_hook(row_mask_hook)
+        def row_mask_hook(grad):
+            if grad is None:
+                return grad
+            return grad * _mask.to(grad.device).view(-1, 1)
+
+        model.get_input_embeddings().weight.register_hook(row_mask_hook)
+        model.get_output_embeddings().weight.register_hook(row_mask_hook)
+
+    trainable_names = [name for name, param in model.named_parameters() if param.requires_grad]
+    rank0_print({
+        "status": "anchor_only_trainable_parameters",
+        "tensor_count": len(trainable_names),
+        "parameter_count": sum(param.numel() for param in model.parameters() if param.requires_grad),
+        "names": trainable_names,
+    })
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer

@@ -44,6 +44,7 @@ mkdir -p "$OUT_DIR" "$RUN_ROOT/logs" "$RUN_ROOT/predictions"
 export WANDB_DISABLED=true
 export WANDB_MODE=disabled
 export TORCH_HOME=/root/.cache/torch
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 cd "$REPO"
 PYTHONPATH="$REPO/train:$REPO/train/src:$REPO/train/src/anchors" \
@@ -60,6 +61,7 @@ CUDA_VISIBLE_DEVICES=0 "$PYTHON" -m training.train \
   --output_dir "$OUT_DIR" \
   --lora_weight_path "$DRONE_ADAPTER" \
   --freeze_warmstart_lora True \
+  --freeze_token_embeddings True \
   --anchor_prompt_mode query_tail \
   --anchor_response_mode none \
   --num_train_epochs 3 \
