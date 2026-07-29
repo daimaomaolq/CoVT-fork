@@ -72,6 +72,7 @@ CUDA_VISIBLE_DEVICES=0 "$PYTHON" -m training.train \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \
   --lr_scheduler_type cosine \
+  --save_strategy no \
   --save_steps 10000 \
   --save_total_limit 1 \
   --logging_steps 5 \
