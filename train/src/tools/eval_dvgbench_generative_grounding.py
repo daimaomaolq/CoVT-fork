@@ -257,15 +257,11 @@ def parse_bbox_text(text: str) -> list[float] | None:
         match = re.search(pattern, search_text)
         if match:
             values = [float(match.group(i)) for i in range(1, 5)]
-            if max(values) > 1.5:
-                values = [value / 1000.0 for value in values]
-            return clamp_box(values)
+            return values
     numbers = re.findall(r"-?\d+(?:\.\d+)?", search_text)
     if len(numbers) >= 4:
         values = [float(value) for value in numbers[:4]]
-        if max(values) > 1.5:
-            values = [value / 1000.0 for value in values]
-        return clamp_box(values)
+        return values
     return None
 
 
@@ -424,6 +420,30 @@ def main() -> None:
             query = str(row.get(args.query_field) or row.get("query") or "")
             raw_output = generate_one(model, processor, device, str(row["image"]), query, args)
             pred_bbox = parse_bbox_text(raw_output)
+            processed_size = None
+            if pred_bbox is not None:
+                if max(pred_bbox) > 1.5:
+                    from PIL import Image
+                    from qwen_vl_utils.vision_process import smart_resize
+
+                    with Image.open(str(row["image"] )) as source_image:
+                        source_width, source_height = source_image.size
+                    processed_height, processed_width = smart_resize(
+                        source_height,
+                        source_width,
+                        factor=28,
+                        min_pixels=args.image_min_pixels,
+                        max_pixels=args.image_max_pixels,
+                    )
+                    pred_bbox = clamp_box([
+                        pred_bbox[0] / processed_width,
+                        pred_bbox[1] / processed_height,
+                        pred_bbox[2] / processed_width,
+                        pred_bbox[3] / processed_height,
+                    ])
+                    processed_size = [processed_width, processed_height]
+                else:
+                    pred_bbox = clamp_box(pred_bbox)
             if pred_bbox is None:
                 parse_failed += 1
             gt_bbox = [float(v) for v in row["bbox_norm"][:4]]
@@ -446,6 +466,14 @@ def main() -> None:
                         "query": query,
                         "raw_output": raw_output,
                         "parse_ok": pred_bbox is not None,
+                        "processed_image_size": processed_size,
+                        "protocol": {
+                            "question_e_used": False,
+                            "gt_visible_during_inference": False,
+                            "coordinate_system": "processed_image_pixels",
+                            "image_min_pixels": args.image_min_pixels,
+                            "image_max_pixels": args.image_max_pixels,
+                        },
                     },
                     ensure_ascii=False,
                 )
