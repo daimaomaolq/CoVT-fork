@@ -25,6 +25,7 @@ from transformers import (
     AutoProcessor,
     CLIPImageProcessor,
     AutoImageProcessor,
+    BitImageProcessor,
 )
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
@@ -426,7 +427,7 @@ class AnchorModels():
             def norm_hook(module, module_input, module_output):
                 self.extracted_outputs["norm_output"] = module_output
             self.hook_handle = self.dinovit.norm.register_forward_hook(norm_hook)
-            self.dino_processor = AutoImageProcessor.from_pretrained(**DINO_PROCESSOR_CONFIG)
+            self.dino_processor = BitImageProcessor(size={"shortest_edge": 256}, crop_size={"height": 448, "width": 448}, image_mean=[0.485, 0.456, 0.406], image_std=[0.229, 0.224, 0.225])
             self.tat_loss = TaTDistillLoss(student_dim=1024, teacher_dim=1024, patch_group=True, group_size=8)
         if "depth" in self.anchor_model_id:
             self.depth_model = DepthAnythingV2(**DEPTH_MODEL_CONFIG)
